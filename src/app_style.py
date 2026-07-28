@@ -34,6 +34,7 @@ QPushButton:hover {
 
 QToolBar#mainToolbar QToolButton:pressed,
 QToolBar#graphToolbar QToolButton:pressed,
+QToolBar#graphToolbar QToolButton:checked,
 QPushButton:pressed {
     background: #dce8f3;
 }
@@ -133,6 +134,14 @@ QLabel#graphPanelTitle {
     color: #1f2a36;
     font-size: 14px;
     font-weight: 700;
+}
+
+QLabel#graphHoverCoordinates {
+    background: #ffffff;
+    border: 1px solid #aeb9c5;
+    border-radius: 4px;
+    color: #243241;
+    padding: 3px 6px;
 }
 
 QLabel#auroraSectionTitle,

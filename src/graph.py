@@ -54,6 +54,9 @@ class _LiveDataset:
         return self._arrays
 
 class graph_widget(QWidget):
+    HOVER_LABEL_OFFSET = 12
+    HOVER_LABEL_MARGIN = 4
+
     def __init__(self):
         super().__init__()
         self.setObjectName("graphWidget")
@@ -66,6 +69,7 @@ class graph_widget(QWidget):
         self.live_curve = None
         self.right_view = None
         self.right_curve = None
+        self.snap_hover_to_data = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -78,7 +82,90 @@ class graph_widget(QWidget):
         self.plot_widget.getAxis("left").setTextPen("#56616f")
         self.plot_item = self.plot_widget.getPlotItem()
         self._setup_right_axis()
+        self._setup_hover_coordinates()
         layout.addWidget(self.plot_widget)
+
+    def _setup_hover_coordinates(self):
+        self.hover_label = QLabel(self.plot_widget)
+        self.hover_label.setObjectName("graphHoverCoordinates")
+        self.hover_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.hover_label.hide()
+        self.plot_item.scene().sigMouseMoved.connect(self._update_hover_coordinates)
+
+    def _update_hover_coordinates(self, scene_position):
+        plot_bounds = self.plot_item.vb.sceneBoundingRect()
+        if self.live_curve is None or not plot_bounds.contains(scene_position):
+            self.hover_label.hide()
+            return
+
+        cursor_coordinates = self.plot_item.vb.mapSceneToView(scene_position)
+        coordinates = (cursor_coordinates.x(), cursor_coordinates.y())
+        if self.snap_hover_to_data:
+            coordinates = self._nearest_visible_data_point(*coordinates)
+            if coordinates is None:
+                self.hover_label.hide()
+                return
+
+        x_value, y_value = coordinates
+        self.hover_label.setText(
+            f"x: {x_value:.6g}\n"
+            f"y: {y_value:.6g}"
+        )
+        self.hover_label.adjustSize()
+
+        cursor_position = self.plot_widget.mapFromScene(scene_position)
+        label_x = min(
+            cursor_position.x() + self.HOVER_LABEL_OFFSET,
+            self.plot_widget.width() - self.hover_label.width() - self.HOVER_LABEL_MARGIN,
+        )
+        label_y = min(
+            cursor_position.y() + self.HOVER_LABEL_OFFSET,
+            self.plot_widget.height() - self.hover_label.height() - self.HOVER_LABEL_MARGIN,
+        )
+        self.hover_label.move(
+            max(self.HOVER_LABEL_MARGIN, label_x),
+            max(self.HOVER_LABEL_MARGIN, label_y),
+        )
+        self.hover_label.show()
+
+    def _nearest_visible_data_point(self, cursor_x, cursor_y):
+        x_data, y_data = self.live_curve.getData()
+        if x_data is None or y_data is None:
+            return None
+
+        x_data = np.asarray(x_data)
+        y_data = np.asarray(y_data)
+        x_range, y_range = self.plot_item.vb.viewRange()
+        visible = (
+            np.isfinite(x_data)
+            & np.isfinite(y_data)
+            & (x_data >= min(x_range))
+            & (x_data <= max(x_range))
+            & (y_data >= min(y_range))
+            & (y_data <= max(y_range))
+        )
+        if not visible.any():
+            return None
+
+        visible_indexes = np.flatnonzero(visible)
+        x_span = abs(x_range[1] - x_range[0]) or 1
+        y_span = abs(y_range[1] - y_range[0]) or 1
+        plot_bounds = self.plot_item.vb.sceneBoundingRect()
+        x_distance = (x_data[visible] - cursor_x) * plot_bounds.width() / x_span
+        y_distance = (y_data[visible] - cursor_y) * plot_bounds.height() / y_span
+        nearest_index = visible_indexes[np.argmin(x_distance ** 2 + y_distance ** 2)]
+        return float(x_data[nearest_index]), float(y_data[nearest_index])
+
+    def set_snap_hover_to_data(self, enabled):
+        self.snap_hover_to_data = enabled
+        self._hide_hover_coordinates()
+
+    def _hide_hover_coordinates(self):
+        self.hover_label.hide()
+
+    def leaveEvent(self, event):
+        self._hide_hover_coordinates()
+        super().leaveEvent(event)
 
     def plot_measurement(self, measurement, selection=None):
         self.measurement = measurement
@@ -93,6 +180,7 @@ class graph_widget(QWidget):
         if not arrays:
             self.plot_widget.clear()
             self.live_curve = None
+            self._hide_hover_coordinates()
             return
 
         if dataset_view is not None:
@@ -194,6 +282,7 @@ class graph_widget(QWidget):
         y_array = np.asarray(y_array).ravel()
         if x_array.shape != y_array.shape:
             return
+        self._hide_hover_coordinates()
         self.plot_widget.clear()
         self._clear_right_axis()
         self.plot_widget.setLabel("bottom", f"{x_label}")
@@ -242,6 +331,7 @@ class graph_widget(QWidget):
             self._plot_arrays(left_x, left_y, x_label, left_label)
             return
 
+        self._hide_hover_coordinates()
         self.plot_widget.clear()
         self._clear_right_axis()
         self.plot_item.showAxis("right")
@@ -516,16 +606,23 @@ class graph_panel(QFrame):
         self.expand_action = QAction("Expand", self)
         self.expand_action.setCheckable(True)
         self.axes_action = QAction("Edit Axes", self)
+        self.nearest_point_action = QAction("Nearest Point", self)
+        self.nearest_point_action.setCheckable(True)
+        self.nearest_point_action.setToolTip(
+            "Snap hover values to the nearest visible point on the primary curve"
+        )
 
         self.toolbar.addAction(self.run_action)
         self.toolbar.addAction(self.stop_action)
         self.toolbar.addAction(self.expand_action)
         self.toolbar.addAction(self.axes_action)
+        self.toolbar.addAction(self.nearest_point_action)
 
         self.run_action.triggered.connect(self.run_requested.emit)
         self.stop_action.triggered.connect(self.stop_requested.emit)
         self.expand_action.toggled.connect(self.expand_requested.emit)
         self.axes_action.triggered.connect(self.edit_axes)
+        self.nearest_point_action.toggled.connect(self.graph.set_snap_hover_to_data)
         self.set_running(False)
 
     def set_running(self, is_running: bool):
