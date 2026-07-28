@@ -24,7 +24,6 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -53,6 +52,7 @@ from src.measurement_data import AuroraStepCompleted, LogicalMeasurementRun
 from src.method_config import METHOD_ORDER, METHOD_SPECS, build_method
 from src.method_worker import measurement_worker
 from src.temperature_chamber.temperature_controller import TemperatureProgress, TemperatureSettings
+from src.widgets import NoScrollComboBox
 import src.device_helpers as pslib
 
 PANEL_COLUMNS = 3
@@ -137,7 +137,7 @@ class bdf_export_dialog(QDialog):
         browse_button = QPushButton("Choose Folder", self)
         browse_button.clicked.connect(self.choose_output_dir)
 
-        self.file_type_combo_box = QComboBox(self)
+        self.file_type_combo_box = NoScrollComboBox(self)
         self.file_type_combo_box.addItem("csv", "csv")
         self.file_type_combo_box.addItem("parquet", "parquet")
 
@@ -400,13 +400,13 @@ class method_configuration_dialog(QDialog):
         self.form_layout.setVerticalSpacing(8)
         layout.addLayout(self.form_layout)
 
-        self.run_mode_combo = QComboBox(self)
+        self.run_mode_combo = NoScrollComboBox(self)
         self.run_mode_combo.addItem("PalmSens method", "native")
         self.run_mode_combo.addItem("Imported package", "aurora_package")
         self.run_mode_combo.addItem("MethodScript", "methodscript")
         self.form_layout.addRow("Run type", self.run_mode_combo)
 
-        self.method_combo = QComboBox(self)
+        self.method_combo = NoScrollComboBox(self)
         for method_key in METHOD_ORDER:
             spec = METHOD_SPECS[method_key]
             self.method_combo.addItem(spec.label, method_key)
@@ -447,7 +447,7 @@ class method_configuration_dialog(QDialog):
         self.aurora_capacity_edit = QLineEdit("", self.package_widget)
         self.package_run_form.addRow("Capacity (mAh)", self.aurora_capacity_edit)
 
-        self.aurora_device_combo = QComboBox(self.package_widget)
+        self.aurora_device_combo = NoScrollComboBox(self.package_widget)
         for label, value in AURORA_DEVICE_OPTIONS:
             self.aurora_device_combo.addItem(label, value)
         self.package_run_form.addRow("PalmSens target", self.aurora_device_combo)
@@ -507,7 +507,7 @@ class method_configuration_dialog(QDialog):
         aurora_auto_bdf_layout.addWidget(self.aurora_auto_bdf_dir_edit, 0, 1)
         aurora_auto_bdf_layout.addWidget(self.aurora_auto_bdf_browse_button, 0, 2)
 
-        self.aurora_auto_bdf_type_combo = QComboBox(self.aurora_auto_bdf_widget)
+        self.aurora_auto_bdf_type_combo = NoScrollComboBox(self.aurora_auto_bdf_widget)
         self.aurora_auto_bdf_type_combo.addItem("csv", "csv")
         self.aurora_auto_bdf_type_combo.addItem("parquet", "parquet")
         aurora_auto_bdf_layout.addWidget(QLabel("Format", self.aurora_auto_bdf_widget), 1, 0)

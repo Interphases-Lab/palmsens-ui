@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.aurora_app.aurora_builder import NoScrollComboBox
 from src.aurora_app.aurora_methods import (
     AURORA_ADDITIONAL_MEASUREMENT_DESCRIPTIONS,
     AURORA_ADDITIONAL_MEASUREMENT_OPTIONS,
@@ -21,6 +20,7 @@ from src.aurora_app.aurora_methods import (
     AURORA_DEVICE_OPTIONS,
     AuroraExportSettings,
 )
+from src.widgets import NoScrollComboBox
 
 
 class AuroraMethodScriptExportDialog(QDialog):

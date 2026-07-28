@@ -6,7 +6,6 @@ from PySide6.QtWidgets import (
     QToolBar,
     QDialog,
     QFormLayout,
-    QComboBox,
     QDialogButtonBox,
     QMessageBox,
     QFrame,
@@ -20,6 +19,7 @@ import re
 import numpy as np
 
 from src.measurement_data import DatasetView, dataset_arrays, default_axis_indexes, measurement_arrays, measurement_dataset_views
+from src.widgets import NoScrollComboBox
 
 def _canonical_measurement_name(name):
     if name.startswith("Applied"):
@@ -347,10 +347,10 @@ class axis_selection_dialog(QDialog):
         self.setWindowTitle("Edit Axes")
 
         layout = QFormLayout(self)
-        self.dataset_combo = QComboBox(self)
-        self.x_combo = QComboBox(self)
-        self.left_y_combo = QComboBox(self)
-        self.right_y_combo = QComboBox(self)
+        self.dataset_combo = NoScrollComboBox(self)
+        self.x_combo = NoScrollComboBox(self)
+        self.left_y_combo = NoScrollComboBox(self)
+        self.right_y_combo = NoScrollComboBox(self)
         self.checkbox = QCheckBox(self)
         self.dataset_views = dataset_views
         self.arrays = []

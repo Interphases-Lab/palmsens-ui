@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
 from src.app_style import APP_STYLESHEET
 from src.aurora_app.aurora_builder import (
     AuroraVisualBuilder,
-    NoScrollComboBox,
     visual_steps_from_protocol_data,
 )
 from src.aurora_app.aurora_methodscript_export_dialog import (
@@ -39,6 +38,7 @@ from src.aurora_app.aurora_methods import (
     render_aurora_package,
     validate_aurora_methodscript_export,
 )
+from src.widgets import NoScrollComboBox
 
 
 class AuroraMethodEditor(QWidget):

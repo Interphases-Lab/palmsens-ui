@@ -8,7 +8,7 @@ from typing import Any
 import aurora_unicycler
 from aurora_unicycler._core import Temperature, _coerce_c_rate
 from PySide6.QtCore import QMimeData, QRect, Qt, Signal
-from PySide6.QtGui import QDrag, QKeySequence, QShortcut, QWheelEvent
+from PySide6.QtGui import QDrag, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -29,17 +29,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.widgets import NoScrollComboBox
+
 Parser = Callable[[Any], Any]
 SummaryBuilder = Callable[[dict[str, Any]], str]
 STEP_DRAG_MIME_TYPE = "application/x-aurora-builder-step"
 STEP_CLIPBOARD_MIME_TYPE = "application/x-aurora-builder-steps+json"
-
-
-class NoScrollComboBox(QComboBox):
-    """A combo box that does not change selection in response to wheel input."""
-
-    def wheelEvent(self, event: QWheelEvent) -> None:
-        event.ignore()
 
 
 FieldValueWidget = QLineEdit | NoScrollComboBox
