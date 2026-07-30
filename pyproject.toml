@@ -5,18 +5,21 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "palmsens-ui"
 version = "0.1.0"
+description = "app for running and visualizing palmSens measurements"
+readme = "README.md"
+requires-python = ">=3.12"
 dependencies = [
 	"PySide6",
 	"PyPalmSens",
 	"pyqtgraph",
 	"pandas",
 	"batterydf",
-	"aurora-unicycler",
+	"aurora-method-builder @ git+ssh://git@github.com/niklas-04/protocol-creator.git@8d412255712d58732e476ae056b412c2b5a98e9a",
 	"pyserial"
 ]
 
-[tool.uv.sources]
-aurora-unicycler = { path = "./aurora-unicycler", editable = true }
+[project.gui-scripts]
+palmsens-ui = "src.main:main"
 
 [tool.setuptools.packages.find]
 include = ["src*"]

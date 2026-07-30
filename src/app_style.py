@@ -56,78 +56,10 @@ QFrame#graphPanel {
     border-radius: 8px;
 }
 
-QFrame#auroraSection,
-QFrame#auroraStepCard,
 QFrame#auroraOptionsCard {
     background: #ffffff;
     border: 1px solid #d8dee6;
     border-radius: 12px;
-}
-
-QFrame#auroraStepCard {
-    border-color: #e4ebf2;
-    border-radius: 6px;
-}
-
-QFrame#auroraStepPalette {
-    background: #f8fafc;
-    border: 1px solid #d8dee6;
-    border-radius: 8px;
-}
-
-QFrame#auroraStepCard[stepType="tag"] {
-    border-left: 5px solid #64748b;
-}
-
-QFrame#auroraStepCard[stepType="open_circuit_voltage"] {
-    border-left: 5px solid #0f766e;
-}
-
-QFrame#auroraStepCard[stepType="wait"] {
-    border-left: 5px solid #0891b2;
-}
-
-QFrame#auroraStepCard[stepType="temperature"] {
-    border-left: 5px solid #dc2626;
-}
-
-QFrame#auroraStepCard[stepType="constant_current"] {
-    border-left: 5px solid #2563eb;
-}
-
-QFrame#auroraStepCard[stepType="constant_voltage"] {
-    border-left: 5px solid #7c3aed;
-}
-
-QFrame#auroraStepCard[stepType="voltage_scan"] {
-    border-left: 5px solid #c2410c;
-}
-
-QFrame#auroraStepCard[stepType="impedance_spectroscopy"] {
-    border-left: 5px solid #be123c;
-}
-
-QFrame#auroraStepCard[stepType="loop"] {
-    border-left: 5px solid #ca8a04;
-}
-
-QFrame#auroraStepCard[selected="true"] {
-    background: #edf6ff;
-    border-top-color: #76a7ce;
-    border-right-color: #76a7ce;
-    border-bottom-color: #76a7ce;
-}
-
-QFrame#auroraStepCard[selected="true"] QLabel#auroraStepIndex {
-    background: #2f6f9f;
-    color: #ffffff;
-}
-
-QFrame#auroraStepCard[dragging="true"] {
-    background: #dceeff;
-    border-top-color: #2f6f9f;
-    border-right-color: #2f6f9f;
-    border-bottom-color: #2f6f9f;
 }
 
 QLabel#graphPanelTitle {
@@ -144,86 +76,14 @@ QLabel#graphHoverCoordinates {
     padding: 3px 6px;
 }
 
-QLabel#auroraSectionTitle,
-QLabel#auroraStepTitle,
 QLabel#auroraCardTitle {
     color: #1f2a36;
     font-size: 13px;
     font-weight: 700;
 }
 
-QLabel#auroraStepSummary,
-QLabel#auroraCardDescription,
-QLabel#auroraHelpText,
-QLabel#auroraSectionDescription,
-QLabel#auroraSequenceMeta,
-QLabel#auroraFieldHint {
+QLabel#auroraHelpText {
     color: #52606d;
-}
-
-QLabel#auroraStepIndex {
-    background: #edf3f8;
-    border: 0;
-    border-radius: 4px;
-    color: #49657f;
-    font-size: 11px;
-    font-weight: 700;
-    min-width: 22px;
-    padding: 2px 6px;
-}
-
-QLabel#auroraStepDragHandle {
-    color: #708090;
-    font-size: 18px;
-    padding: 0 3px;
-}
-
-QLabel#auroraStepDragHandle:hover {
-    color: #2f6f9f;
-}
-
-QScrollArea#auroraStepsScroll QFrame#auroraDropIndicator {
-    background: #2f6f9f;
-    border: 0;
-    border-radius: 1px;
-}
-
-QLabel#auroraCompactFieldLabel {
-    color: #52606d;
-    font-size: 12px;
-    padding-left: 4px;
-}
-
-QPushButton#auroraStepAction,
-QPushButton#auroraAddStepButton {
-    padding: 3px 8px;
-}
-
-QPushButton#auroraStepTypeButton {
-    background: transparent;
-    border-color: transparent;
-    border-radius: 5px;
-    padding: 5px 8px;
-    text-align: left;
-}
-
-QPushButton#auroraStepTypeButton:hover {
-    background: #ffffff;
-    border-color: #b8c5d1;
-}
-
-QPushButton#auroraStepTypeButton:pressed {
-    background: #e5eef7;
-    border-color: #8ca3ba;
-}
-
-QScrollArea#auroraStepsScroll {
-    background: transparent;
-    border: 0;
-}
-
-QScrollArea#auroraStepsScroll QWidget {
-    background: transparent;
 }
 
 QCheckBox {

@@ -8,7 +8,7 @@ if __package__ in {None, ""}:
 
 import pypalmsens as ps
 from src.app_style import APP_STYLESHEET
-from src.aurora_app.aurora_methods import (
+from aurora_method_builder.methods import (
     AURORA_ADDITIONAL_MEASUREMENT_DESCRIPTIONS,
     AURORA_ADDITIONAL_MEASUREMENT_OPTIONS,
     AURORA_DEVICE_MEASUREMENT_TYPES,
@@ -56,7 +56,6 @@ from src.widgets import NoScrollComboBox
 import src.device_helpers as pslib
 
 PANEL_COLUMNS = 3
-AURORA_APP_SUBDIRECTORY = "aurora_app"
 
 
 @dataclass(frozen=True)
@@ -1169,14 +1168,13 @@ class main_window(QMainWindow):
 
     def open_aurora_builder(self):
         project_dir = Path(__file__).parent.parent
-        builder_module = f"src.{AURORA_APP_SUBDIRECTORY}.aurora_method_builder_app"
-        builder_path = project_dir / "src" / AURORA_APP_SUBDIRECTORY / "aurora_method_builder_app.py"
+        builder_module = "aurora_method_builder"
         started = QProcess.startDetached(sys.executable, ["-m", builder_module], str(project_dir))
         if not started:
             QMessageBox.warning(
                 self,
                 "Launch failed",
-                f"Could not start the Aurora builder:\n{builder_path}",
+                "Could not start the Aurora builder. Ensure the project dependencies are installed.",
             )
 
     def on_connect(self, dev):
