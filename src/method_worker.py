@@ -6,8 +6,8 @@ import time
 from PySide6.QtCore import QObject, Signal, Slot
 import pypalmsens as ps
 
-from src.aurora_app.aurora_methods import AuroraStepwiseMethod
-from src.measurement_data import LogicalMeasurementRun, MeasurementSegment
+from aurora_method_builder.methods import AuroraStepwiseMethod
+from src.measurement_data import AuroraStepCompleted, LogicalMeasurementRun, MeasurementSegment
 from src.temperature_chamber.temperature_controller import TemperatureController, TemperatureProgress
 
 
@@ -96,17 +96,17 @@ class measurement_worker(QObject):
                 manager.validate_method(method)
                 segment_offset_s = time.monotonic() - run_start
                 measurement = await manager.measure(method, callback=on_data)
-                run.add_segment(
-                    MeasurementSegment(
-                        index=len(run.segments) + 1,
-                        label=action.label,
-                        source=measurement,
-                        elapsed_offset_s=segment_offset_s,
-                        source_step_index=action.source_step_index,
-                        step_type=action.step_type,
-                        execution_index=action.execution_index,
-                    )
+                segment = MeasurementSegment(
+                    index=len(run.segments) + 1,
+                    label=action.label,
+                    source=measurement,
+                    elapsed_offset_s=segment_offset_s,
+                    source_step_index=action.source_step_index,
+                    step_type=action.step_type,
+                    execution_index=action.execution_index,
                 )
+                run.add_segment(segment)
+                self.progress.emit(AuroraStepCompleted(segment))
         finally:
             if temperature_controller is not None:
                 temperature_controller.close()
@@ -125,13 +125,13 @@ class measurement_worker(QObject):
         if target_c is None:
             raise RuntimeError("Temperature step is missing a target temperature.")
 
-        dwell_s = action.wait_after_s or 0.0
+        wait_s = action.wait_after_s or 0.0
         self.progress.emit(
             TemperatureProgress(
                 target_c=target_c,
                 temperature_c=None,
                 setpoint_c=None,
-                stable_for_s=0.0,
+                wait_elapsed_s=0.0,
                 message=f"Setting chamber to {target_c:.2f} C",
             )
         )
@@ -142,19 +142,25 @@ class measurement_worker(QObject):
         temperature_controller.set_target(target_c)
 
         status = await asyncio.to_thread(
-            temperature_controller.wait_until_stable,
+            temperature_controller.wait_for_temperature_step,
             target_c,
-            dwell_s,
+            wait_s,
             self._abort_requested,
             self.progress.emit,
+            timer_starts_immediately=action.wait_starts_immediately,
+        )
+        completion = (
+            "Temperature timer completed"
+            if action.wait_starts_immediately
+            else "Temperature stabilized"
         )
         self.progress.emit(
             TemperatureProgress(
                 target_c=target_c,
                 temperature_c=status.temperature_c,
                 setpoint_c=status.setpoint_c,
-                stable_for_s=dwell_s,
-                message=f"Temperature stabilized at {status.temperature_c:.2f} C",
+                wait_elapsed_s=wait_s,
+                message=f"{completion} at {status.temperature_c:.2f} C",
             )
         )
 

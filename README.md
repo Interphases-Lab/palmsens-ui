@@ -2,17 +2,19 @@
 
 Small PySide6 desktop app for running PalmSens measurements, plotting live data, and exporting results to Battery Data Format-style CSV files.
 
-This project mainly builds upon three seperate related works:
-- PyPalmSens (https://github.com/PalmSens/PalmSens_SDK/releases)
-- Aurora Unicycler (https://github.com/EmpaEConversion/aurora-unicycler)
-- Battery Data Format (https://github.com/battery-data-alliance/battery-data-format)
+This project mainly builds upon three related works:
 
-Note: The system introduces two new steps in measurements that aurora unicycler currently does not implement (Wait, Temperature), and therefore relies on a fork (https://github.com/Laswer5/aurora-unicycler).
+- [PyPalmSens](https://github.com/PalmSens/PalmSens_SDK/releases)
+- [Aurora Method Builder](https://github.com/niklas-04/protocol-creator)
+- [Battery Data Format](https://github.com/battery-data-alliance/battery-data-format)
+- [Aurora Unicycler](https://github.com/EmpaEConversion/aurora-unicycler)
+
+The method builder is maintained in its own repository and installed automatically from the pinned Git revision in `pyproject.toml`. GitHub SSH access is required to install this private dependency.
 
 Some of the functionality includes:
 
 - Connecting to PalmSens instruments through PyPalmSens.
-- Runs built-in PalmSens methods, pasted MethodSCRIPT, or imported Aurora method packages.
+- Runs built-in PalmSens methods, pasted MethodSCRIPT, or imported method packages.
 - Converts Aurora packages into step-by-step execution so each PalmSens-compatible step runs as its own MethodSCRIPT measurement.
 - Groups those step measurements into one logical run for plotting and export.
 - Handles time-series data and EIS data separately, while preserving shared step metadata such as step id, step type, and execution index.
@@ -24,27 +26,49 @@ Temperature steps are non-Palsmens native steps and are handled directly by the 
 
 Leave the serial port blank to auto-detect Arduino USB serial devices, or enter a port such as `COM31`.
 
-# Method defintion and packaging
-Currently the aurora module exists as it own system. Defining a method creates a psmethod file which contains the following fields:
+## Run
 
-- format: Fixed identifier
-- version: Used to avoid bugs with old psmethods being ran
-- name: user-entered method name
-- source_mode: One of three values depending on how the psmethod was created: aurora_visual, aurora_json, aurora_python
-- source_payload: Editable source representation
-- protocol_json: normalized Aurora Unicycler protocol produced by CyclingProtocol.to_dict() (see aurora unicycler)
+Python 3.12 or newer is required. From the repository root, the shortest setup is with [uv](https://docs.astral.sh/uv/):
 
-## Running
-Install the project dependencies:
-
-```powershell
-make setup
+```sh
+uv run palmsens-ui
 ```
 
-then run:
+`uv` creates the environment and installs the dependencies automatically on the first run.
 
-```powershell
-make run
+Alternatively, install it with `pip`:
+
+```sh
+python -m venv .venv
+```
+
+Activate the environment:
+
+```sh
+# Linux
+source .venv/bin/activate
+
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+```
+
+Then install and run the application:
+
+```sh
+python -m pip install -e .
+palmsens-ui
+```
+
+The standalone method builder is installed into the same environment. Run it with `uv`:
+
+```sh
+uv run aurora-method-builder
+```
+
+Or, from the activated `pip` environment:
+
+```sh
+aurora-method-builder
 ```
 
 # TODOs

@@ -34,11 +34,13 @@ QPushButton:hover {
 
 QToolBar#mainToolbar QToolButton:pressed,
 QToolBar#graphToolbar QToolButton:pressed,
+QToolBar#graphToolbar QToolButton:checked,
 QPushButton:pressed {
     background: #dce8f3;
 }
 
-QToolButton:disabled {
+QToolButton:disabled,
+QPushButton:disabled {
     color: #8a96a3;
     background: #f5f7f9;
     border-color: #d8dee6;
@@ -54,53 +56,10 @@ QFrame#graphPanel {
     border-radius: 8px;
 }
 
-QFrame#auroraSection,
-QFrame#auroraStepCard,
 QFrame#auroraOptionsCard {
     background: #ffffff;
     border: 1px solid #d8dee6;
     border-radius: 12px;
-}
-
-QFrame#auroraStepCard {
-    border-color: #e4ebf2;
-    border-radius: 6px;
-}
-
-QFrame#auroraStepCard[stepType="tag"] {
-    border-left: 5px solid #64748b;
-}
-
-QFrame#auroraStepCard[stepType="open_circuit_voltage"] {
-    border-left: 5px solid #0f766e;
-}
-
-QFrame#auroraStepCard[stepType="wait"] {
-    border-left: 5px solid #0891b2;
-}
-
-QFrame#auroraStepCard[stepType="temperature"] {
-    border-left: 5px solid #dc2626;
-}
-
-QFrame#auroraStepCard[stepType="constant_current"] {
-    border-left: 5px solid #2563eb;
-}
-
-QFrame#auroraStepCard[stepType="constant_voltage"] {
-    border-left: 5px solid #7c3aed;
-}
-
-QFrame#auroraStepCard[stepType="voltage_scan"] {
-    border-left: 5px solid #c2410c;
-}
-
-QFrame#auroraStepCard[stepType="impedance_spectroscopy"] {
-    border-left: 5px solid #be123c;
-}
-
-QFrame#auroraStepCard[stepType="loop"] {
-    border-left: 5px solid #ca8a04;
 }
 
 QLabel#graphPanelTitle {
@@ -109,52 +68,22 @@ QLabel#graphPanelTitle {
     font-weight: 700;
 }
 
-QLabel#auroraSectionTitle,
-QLabel#auroraStepTitle,
+QLabel#graphHoverCoordinates {
+    background: #ffffff;
+    border: 1px solid #aeb9c5;
+    border-radius: 4px;
+    color: #243241;
+    padding: 3px 6px;
+}
+
 QLabel#auroraCardTitle {
     color: #1f2a36;
     font-size: 13px;
     font-weight: 700;
 }
 
-QLabel#auroraStepSummary,
-QLabel#auroraCardDescription,
-QLabel#auroraHelpText,
-QLabel#auroraSectionDescription,
-QLabel#auroraSequenceMeta,
-QLabel#auroraFieldHint {
+QLabel#auroraHelpText {
     color: #52606d;
-}
-
-QLabel#auroraStepIndex {
-    background: #edf3f8;
-    border: 0;
-    border-radius: 4px;
-    color: #49657f;
-    font-size: 11px;
-    font-weight: 700;
-    min-width: 22px;
-    padding: 2px 6px;
-}
-
-QLabel#auroraCompactFieldLabel {
-    color: #52606d;
-    font-size: 12px;
-    padding-left: 4px;
-}
-
-QPushButton#auroraStepAction,
-QPushButton#auroraAddStepButton {
-    padding: 3px 8px;
-}
-
-QScrollArea#auroraStepsScroll {
-    background: transparent;
-    border: 0;
-}
-
-QScrollArea#auroraStepsScroll QWidget {
-    background: transparent;
 }
 
 QCheckBox {

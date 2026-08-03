@@ -1,5 +1,6 @@
 import sys
 from datetime import date
+from dataclasses import dataclass
 from pathlib import Path
 
 if __package__ in {None, ""}:
@@ -7,7 +8,8 @@ if __package__ in {None, ""}:
 
 import pypalmsens as ps
 from src.app_style import APP_STYLESHEET
-from src.aurora_app.aurora_methods import (
+from aurora_method_builder.methods import (
+    AURORA_ADDITIONAL_MEASUREMENT_DESCRIPTIONS,
     AURORA_ADDITIONAL_MEASUREMENT_OPTIONS,
     AURORA_DEVICE_MEASUREMENT_TYPES,
     AURORA_DEVICE_OPTIONS,
@@ -22,7 +24,6 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -39,6 +40,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QToolButton,
     QToolBar,
     QVBoxLayout,
@@ -46,13 +48,26 @@ from PySide6.QtWidgets import (
 )
 
 from src.graph import graph_panel
+from src.measurement_data import AuroraStepCompleted, LogicalMeasurementRun
 from src.method_config import METHOD_ORDER, METHOD_SPECS, build_method
 from src.method_worker import measurement_worker
 from src.temperature_chamber.temperature_controller import TemperatureProgress, TemperatureSettings
+from src.widgets import NoScrollComboBox
 import src.device_helpers as pslib
 
 PANEL_COLUMNS = 3
-AURORA_APP_SUBDIRECTORY = "aurora_app"
+
+
+@dataclass(frozen=True)
+class BdfAutoSaveSettings:
+    output_dir: Path
+    export_type: str
+    cell_name: str
+    cas_id: str
+    optional_quantity_keys: set[str]
+    use_step_based_filenames: bool = False
+    filename_prefix: str = ""
+
 
 class connection_indicator(QLabel):
     def __init__(self, parent=None):
@@ -121,7 +136,7 @@ class bdf_export_dialog(QDialog):
         browse_button = QPushButton("Choose Folder", self)
         browse_button.clicked.connect(self.choose_output_dir)
 
-        self.file_type_combo_box = QComboBox(self)
+        self.file_type_combo_box = NoScrollComboBox(self)
         self.file_type_combo_box.addItem("csv", "csv")
         self.file_type_combo_box.addItem("parquet", "parquet")
 
@@ -362,6 +377,7 @@ class method_configuration_dialog(QDialog):
         self.method = None
         self.method_label = ""
         self.temperature_settings = None
+        self.bdf_auto_save_settings = None
         self.instrument = instrument
         self.imported_package = None
         self.imported_package_path: Path | None = None
@@ -383,13 +399,13 @@ class method_configuration_dialog(QDialog):
         self.form_layout.setVerticalSpacing(8)
         layout.addLayout(self.form_layout)
 
-        self.run_mode_combo = QComboBox(self)
+        self.run_mode_combo = NoScrollComboBox(self)
         self.run_mode_combo.addItem("PalmSens method", "native")
         self.run_mode_combo.addItem("Imported package", "aurora_package")
         self.run_mode_combo.addItem("MethodScript", "methodscript")
         self.form_layout.addRow("Run type", self.run_mode_combo)
 
-        self.method_combo = QComboBox(self)
+        self.method_combo = NoScrollComboBox(self)
         for method_key in METHOD_ORDER:
             spec = METHOD_SPECS[method_key]
             self.method_combo.addItem(spec.label, method_key)
@@ -430,7 +446,7 @@ class method_configuration_dialog(QDialog):
         self.aurora_capacity_edit = QLineEdit("", self.package_widget)
         self.package_run_form.addRow("Capacity (mAh)", self.aurora_capacity_edit)
 
-        self.aurora_device_combo = QComboBox(self.package_widget)
+        self.aurora_device_combo = NoScrollComboBox(self.package_widget)
         for label, value in AURORA_DEVICE_OPTIONS:
             self.aurora_device_combo.addItem(label, value)
         self.package_run_form.addRow("PalmSens target", self.aurora_device_combo)
@@ -458,10 +474,66 @@ class method_configuration_dialog(QDialog):
         self.additional_measurement_layout.setVerticalSpacing(6)
         for index, (var_type, label) in enumerate(AURORA_ADDITIONAL_MEASUREMENT_OPTIONS):
             checkbox = QCheckBox(label, self.additional_measurement_widget)
-            checkbox.setToolTip(f"Measure MethodSCRIPT variable type {var_type} with add_meas.")
+            description = AURORA_ADDITIONAL_MEASUREMENT_DESCRIPTIONS[var_type]
+            checkbox.setToolTip(
+                f"{description}\nMethodSCRIPT variable type: {var_type} (added with add_meas)."
+            )
             self.additional_measurement_checks[var_type] = checkbox
             self.additional_measurement_layout.addWidget(checkbox, index // 2, index % 2)
         package_layout.addWidget(self.additional_measurement_widget)
+
+        bdf_auto_save_title = QLabel("BDF auto-save", self.package_widget)
+        bdf_auto_save_title.setObjectName("auroraCardTitle")
+        package_layout.addWidget(bdf_auto_save_title)
+
+        self.aurora_auto_bdf_checkbox = QCheckBox(
+            "Save BDF after each measurement step",
+            self.package_widget,
+        )
+        package_layout.addWidget(self.aurora_auto_bdf_checkbox)
+
+        self.aurora_auto_bdf_widget = QWidget(self.package_widget)
+        aurora_auto_bdf_layout = QGridLayout(self.aurora_auto_bdf_widget)
+        aurora_auto_bdf_layout.setContentsMargins(0, 0, 0, 0)
+        aurora_auto_bdf_layout.setHorizontalSpacing(8)
+        aurora_auto_bdf_layout.setVerticalSpacing(8)
+
+        default_bdf_dir = Path(__file__).parent.parent / "out2" / "temp"
+        self.aurora_auto_bdf_dir_edit = QLineEdit(str(default_bdf_dir), self.aurora_auto_bdf_widget)
+        self.aurora_auto_bdf_browse_button = QPushButton("Choose Folder", self.aurora_auto_bdf_widget)
+        self.aurora_auto_bdf_browse_button.clicked.connect(self.choose_auto_bdf_output_dir)
+        aurora_auto_bdf_layout.addWidget(QLabel("Folder", self.aurora_auto_bdf_widget), 0, 0)
+        aurora_auto_bdf_layout.addWidget(self.aurora_auto_bdf_dir_edit, 0, 1)
+        aurora_auto_bdf_layout.addWidget(self.aurora_auto_bdf_browse_button, 0, 2)
+
+        self.aurora_auto_bdf_type_combo = NoScrollComboBox(self.aurora_auto_bdf_widget)
+        self.aurora_auto_bdf_type_combo.addItem("csv", "csv")
+        self.aurora_auto_bdf_type_combo.addItem("parquet", "parquet")
+        aurora_auto_bdf_layout.addWidget(QLabel("Format", self.aurora_auto_bdf_widget), 1, 0)
+        aurora_auto_bdf_layout.addWidget(self.aurora_auto_bdf_type_combo, 1, 1, 1, 2)
+
+        self.aurora_auto_bdf_cell_name_edit = QLineEdit("A0001", self.aurora_auto_bdf_widget)
+        self.aurora_auto_bdf_cell_name_edit.setPlaceholderText("e.g. A0001")
+        aurora_auto_bdf_layout.addWidget(QLabel("Cell name", self.aurora_auto_bdf_widget), 2, 0)
+        aurora_auto_bdf_layout.addWidget(self.aurora_auto_bdf_cell_name_edit, 2, 1, 1, 2)
+
+        self.aurora_auto_bdf_cas_id_edit = QLineEdit("", self.aurora_auto_bdf_widget)
+        self.aurora_auto_bdf_cas_id_edit.setPlaceholderText("e.g. nisu1374")
+        aurora_auto_bdf_layout.addWidget(QLabel("CAS ID", self.aurora_auto_bdf_widget), 3, 0)
+        aurora_auto_bdf_layout.addWidget(self.aurora_auto_bdf_cas_id_edit, 3, 1, 1, 2)
+
+        self.aurora_auto_bdf_step_naming_checkbox = QCheckBox(
+            "Use step type in file names",
+            self.aurora_auto_bdf_widget,
+        )
+        aurora_auto_bdf_layout.addWidget(self.aurora_auto_bdf_step_naming_checkbox, 4, 0, 1, 3)
+
+        self.aurora_auto_bdf_filename_prefix_edit = QLineEdit("", self.aurora_auto_bdf_widget)
+        self.aurora_auto_bdf_filename_prefix_edit.setPlaceholderText("e.g. experiment_1")
+        aurora_auto_bdf_layout.addWidget(QLabel("Base name", self.aurora_auto_bdf_widget), 5, 0)
+        aurora_auto_bdf_layout.addWidget(self.aurora_auto_bdf_filename_prefix_edit, 5, 1, 1, 2)
+        aurora_auto_bdf_layout.setColumnStretch(1, 1)
+        package_layout.addWidget(self.aurora_auto_bdf_widget)
 
         temperature_title = QLabel("Temperature Chamber", self.package_widget)
         temperature_title.setObjectName("auroraCardTitle")
@@ -543,8 +615,11 @@ class method_configuration_dialog(QDialog):
         self.run_mode_combo.currentIndexChanged.connect(self.rebuild_mode)
         self.aurora_device_combo.currentIndexChanged.connect(self.update_additional_measurements)
         self.temperature_enabled_checkbox.toggled.connect(self.update_temperature_fields)
+        self.aurora_auto_bdf_checkbox.toggled.connect(self.update_auto_bdf_fields)
+        self.aurora_auto_bdf_step_naming_checkbox.toggled.connect(self.update_auto_bdf_fields)
         self.update_additional_measurements()
         self.update_temperature_fields()
+        self.update_auto_bdf_fields()
         self.rebuild_fields()
         self.rebuild_mode()
 
@@ -593,6 +668,46 @@ class method_configuration_dialog(QDialog):
             self.temperature_stop_on_abort_checkbox,
         ):
             widget.setEnabled(enabled)
+
+    def choose_auto_bdf_output_dir(self):
+        directory = QFileDialog.getExistingDirectory(self, "Choose BDF auto-save folder")
+        if directory:
+            self.aurora_auto_bdf_dir_edit.setText(directory)
+
+    def update_auto_bdf_fields(self):
+        enabled = self.aurora_auto_bdf_checkbox.isChecked()
+        self.aurora_auto_bdf_widget.setVisible(enabled)
+        use_step_names = self.aurora_auto_bdf_step_naming_checkbox.isChecked()
+        self.aurora_auto_bdf_filename_prefix_edit.setEnabled(use_step_names)
+        self.aurora_auto_bdf_cell_name_edit.setEnabled(not use_step_names)
+        self.aurora_auto_bdf_cas_id_edit.setEnabled(not use_step_names)
+
+    def build_bdf_auto_save_settings(self) -> BdfAutoSaveSettings | None:
+        if not self.aurora_auto_bdf_checkbox.isChecked():
+            return None
+
+        raw_output_dir = self.aurora_auto_bdf_dir_edit.text().strip()
+        if not raw_output_dir:
+            raise ValueError("BDF auto-save folder is required.")
+
+        use_step_names = self.aurora_auto_bdf_step_naming_checkbox.isChecked()
+        filename_prefix = self.aurora_auto_bdf_filename_prefix_edit.text().strip()
+        if use_step_names and not self._is_valid_filename_prefix(filename_prefix):
+            raise ValueError("A base name containing at least one letter or number is required.")
+
+        return BdfAutoSaveSettings(
+            output_dir=Path(raw_output_dir),
+            export_type=self.aurora_auto_bdf_type_combo.currentData(),
+            cell_name=self.aurora_auto_bdf_cell_name_edit.text().strip() or "A0001",
+            cas_id=self.aurora_auto_bdf_cas_id_edit.text().strip(),
+            optional_quantity_keys={quantity_key for quantity_key, _ in bdf_optional_quantity_choices()},
+            use_step_based_filenames=use_step_names,
+            filename_prefix=filename_prefix,
+        )
+
+    @staticmethod
+    def _is_valid_filename_prefix(value: str) -> bool:
+        return any(character.isalnum() for character in value)
 
     def build_temperature_settings(self) -> TemperatureSettings | None:
         if not self.temperature_enabled_checkbox.isChecked():
@@ -692,10 +807,16 @@ class method_configuration_dialog(QDialog):
                 self.method = build_method(self.selected_method_key(), self.raw_params())
                 self.method_label = METHOD_SPECS[self.selected_method_key()].label
                 self.temperature_settings = None
+                self.bdf_auto_save_settings = None
             else:
                 self.method = self.build_script_method(run_mode)
                 self.temperature_settings = (
                     self.build_temperature_settings()
+                    if run_mode == "aurora_package"
+                    else None
+                )
+                self.bdf_auto_save_settings = (
+                    self.build_bdf_auto_save_settings()
                     if run_mode == "aurora_package"
                     else None
                 )
@@ -897,6 +1018,9 @@ class main_window(QMainWindow):
         self.stopping_panels: set[graph_panel] = set()
         self.worker_panels: dict[measurement_worker, graph_panel] = {}
         self.worker_method_labels: dict[measurement_worker, str] = {}
+        self.worker_bdf_auto_save_settings: dict[measurement_worker, BdfAutoSaveSettings] = {}
+        self.worker_bdf_auto_save_sequences: dict[measurement_worker, set[int]] = {}
+        self.worker_bdf_auto_save_failed: set[measurement_worker] = set()
         self.thread_panels: dict[QThread, graph_panel] = {}
 
         self.setWindowTitle("Palmsens demo")
@@ -922,11 +1046,6 @@ class main_window(QMainWindow):
         self.disconnect_action.triggered.connect(self.request_disconnect)
         toolbar.addAction(self.disconnect_action)
 
-        self.debug_device_action = QAction("Debug Device", self)
-        self.debug_device_action.setCheckable(True)
-        self.debug_device_action.setStatusTip("Use a mock 9-channel test device when scanning")
-        toolbar.addAction(self.debug_device_action)
-
         self.aurora_builder_action = QAction("Aurora Builder", self)
         self.aurora_builder_action.setStatusTip("Open the standalone Aurora method builder")
         self.aurora_builder_action.triggered.connect(self.open_aurora_builder)
@@ -951,6 +1070,19 @@ class main_window(QMainWindow):
         self.export_bdf_action.setStatusTip("Export selected channel measurements as BDF files")
         self.export_bdf_action.triggered.connect(self.export_bdf)
         toolbar.addAction(self.export_bdf_action)
+
+        toolbar_spacer = QWidget(toolbar)
+        toolbar_spacer.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        toolbar.addWidget(toolbar_spacer)
+
+        self.debug_device_checkbox = QCheckBox("Debug device", toolbar)
+        self.debug_device_checkbox.setToolTip(
+            "Use a mock 9-channel test device when scanning"
+        )
+        toolbar.addWidget(self.debug_device_checkbox)
 
         self.connection_indicator = connection_indicator()
         self.statusBar().addPermanentWidget(self.connection_indicator)
@@ -987,7 +1119,7 @@ class main_window(QMainWindow):
             return
 
         try:
-            devices = pslib.find_devices(debug_mode=self.debug_device_action.isChecked())
+            devices = pslib.find_devices(debug_mode=self.debug_device_checkbox.isChecked())
         except Exception as exc:
             QMessageBox.critical(
                 self,
@@ -1016,6 +1148,19 @@ class main_window(QMainWindow):
             )
             return
 
+        if not self.device_manager.is_connected:
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Disconnect device?",
+            "Are you sure you want to disconnect the device?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
         self.device_manager.disconnect_device()
 
     def update_connection(self, is_connected: bool):
@@ -1023,14 +1168,13 @@ class main_window(QMainWindow):
 
     def open_aurora_builder(self):
         project_dir = Path(__file__).parent.parent
-        builder_module = f"src.{AURORA_APP_SUBDIRECTORY}.aurora_method_builder_app"
-        builder_path = project_dir / "src" / AURORA_APP_SUBDIRECTORY / "aurora_method_builder_app.py"
+        builder_module = "aurora_method_builder"
         started = QProcess.startDetached(sys.executable, ["-m", builder_module], str(project_dir))
         if not started:
             QMessageBox.warning(
                 self,
                 "Launch failed",
-                f"Could not start the Aurora builder:\n{builder_path}",
+                "Could not start the Aurora builder. Ensure the project dependencies are installed.",
             )
 
     def on_connect(self, dev):
@@ -1229,9 +1373,33 @@ class main_window(QMainWindow):
 
         method = dialog.method
         method_label = dialog.method_label
-        self.start_measurement(panel, method, method_label, dialog.temperature_settings)
+        bdf_auto_save_settings = dialog.bdf_auto_save_settings
+        if bdf_auto_save_settings is not None:
+            try:
+                bdf_auto_save_settings.output_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "BDF auto-save error",
+                    f"Could not create BDF auto-save folder:\n{exc}",
+                )
+                return
+        self.start_measurement(
+            panel,
+            method,
+            method_label,
+            dialog.temperature_settings,
+            bdf_auto_save_settings,
+        )
 
-    def start_measurement(self, panel: graph_panel, method, method_label: str, temperature_settings=None):
+    def start_measurement(
+        self,
+        panel: graph_panel,
+        method,
+        method_label: str,
+        temperature_settings=None,
+        bdf_auto_save_settings: BdfAutoSaveSettings | None = None,
+    ):
         thread = QThread(self)
         worker = measurement_worker(
             panel.instrument,
@@ -1241,6 +1409,9 @@ class main_window(QMainWindow):
         worker.moveToThread(thread)
         self.worker_panels[worker] = panel
         self.worker_method_labels[worker] = method_label
+        if bdf_auto_save_settings is not None:
+            self.worker_bdf_auto_save_settings[worker] = bdf_auto_save_settings
+            self.worker_bdf_auto_save_sequences[worker] = set()
         self.thread_panels[thread] = panel
 
         thread.started.connect(worker.run)
@@ -1274,11 +1445,70 @@ class main_window(QMainWindow):
         panel = self.worker_panels.get(worker)
         if panel is None or panel not in self.panels:
             return
+        if isinstance(callback_data, AuroraStepCompleted):
+            self.auto_save_aurora_step_bdf(worker, panel, callback_data.segment)
+            return
         if isinstance(callback_data, TemperatureProgress):
             panel.set_status_text(callback_data.message)
             self.statusBar().showMessage(f"{panel.base_title}: {callback_data.message}", 0)
             return
         panel.graph.plot_live_data(callback_data)
+
+    def auto_save_aurora_step_bdf(self, worker, panel: graph_panel, segment):
+        settings = self.worker_bdf_auto_save_settings.get(worker)
+        if settings is None:
+            return
+
+        try:
+            if settings.use_step_based_filenames:
+                filename_stem = self._step_bdf_export_stem(
+                    settings.filename_prefix,
+                    segment.step_type,
+                    segment.index,
+                )
+            else:
+                used_sequence_numbers = self.worker_bdf_auto_save_sequences.setdefault(worker, set())
+                sequence_number = self._next_bdf_sequence_number(
+                    settings.output_dir,
+                    settings.cell_name,
+                    settings.cas_id,
+                    settings.export_type,
+                    used_sequence_numbers,
+                )
+                used_sequence_numbers.add(sequence_number)
+                filename_stem = self._bdf_export_stem(settings.cell_name, settings.cas_id, sequence_number)
+
+            step_run = LogicalMeasurementRun(f"{panel.base_title} step {segment.index}", [segment])
+            written_files = export_measurement_to_bdf_files(
+                step_run,
+                settings.output_dir,
+                filename_stem,
+                settings.export_type,
+                False,
+                settings.optional_quantity_keys,
+            )
+        except BdfExportError as exc:
+            self._report_bdf_auto_save_failure(worker, panel, str(exc))
+            return
+        except Exception as exc:
+            self._report_bdf_auto_save_failure(worker, panel, f"Failed to auto-save BDF files:\n{exc}")
+            return
+
+        self.statusBar().showMessage(
+            f"Auto-saved Aurora step {segment.index} from {panel.base_title} as {len(written_files)} BDF file(s).",
+            5000,
+        )
+
+    def _report_bdf_auto_save_failure(self, worker, panel: graph_panel, message: str):
+        self.statusBar().showMessage(f"BDF auto-save failed on {panel.base_title}.", 5000)
+        if worker in self.worker_bdf_auto_save_failed:
+            return
+        self.worker_bdf_auto_save_failed.add(worker)
+        QMessageBox.warning(
+            self,
+            "BDF auto-save failed",
+            f"{panel.base_title} could not auto-save a BDF file:\n{message}",
+        )
 
     def handle_worker_finished(self, worker, measurement):
         panel = self.worker_panels.get(worker)
@@ -1308,6 +1538,9 @@ class main_window(QMainWindow):
         if worker_to_remove is not None:
             self.worker_panels.pop(worker_to_remove, None)
             self.worker_method_labels.pop(worker_to_remove, None)
+            self.worker_bdf_auto_save_settings.pop(worker_to_remove, None)
+            self.worker_bdf_auto_save_sequences.pop(worker_to_remove, None)
+            self.worker_bdf_auto_save_failed.discard(worker_to_remove)
 
     def on_measurement_finished(self, panel: graph_panel, method_label: str, measurement):
         if panel in self.stopping_panels:
@@ -1373,6 +1606,17 @@ class main_window(QMainWindow):
         if sanitized_cas_id:
             return f"UU_{sanitized_cell_name}_{sanitized_cas_id}_{export_date}_{sequence_number:04d}"
         return f"UU_{sanitized_cell_name}_{export_date}_{sequence_number:04d}"
+
+    @classmethod
+    def _step_bdf_export_stem(
+        cls,
+        filename_prefix: str,
+        step_type: str | None,
+        measurement_number: int,
+    ) -> str:
+        sanitized_prefix = cls._sanitize_export_name(filename_prefix) or "measurement"
+        sanitized_step_type = cls._sanitize_export_name(step_type or "step") or "step"
+        return f"{sanitized_prefix}_{measurement_number}_{sanitized_step_type}"
 
     @classmethod
     def _next_bdf_sequence_number(
