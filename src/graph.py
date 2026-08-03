@@ -56,6 +56,7 @@ class _LiveDataset:
 class graph_widget(QWidget):
     HOVER_LABEL_OFFSET = 12
     HOVER_LABEL_MARGIN = 4
+    HOVER_MARKER_SIZE = 10
 
     def __init__(self):
         super().__init__()
@@ -86,16 +87,27 @@ class graph_widget(QWidget):
         layout.addWidget(self.plot_widget)
 
     def _setup_hover_coordinates(self):
+        self.hover_marker = pg.ScatterPlotItem(
+            size=self.HOVER_MARKER_SIZE,
+            pen=pg.mkPen("#ffffff", width=2),
+            brush=pg.mkBrush("#2f6f9f"),
+        )
+        self._add_hover_marker()
+        self.hover_marker.hide()
+
         self.hover_label = QLabel(self.plot_widget)
         self.hover_label.setObjectName("graphHoverCoordinates")
         self.hover_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.hover_label.hide()
         self.plot_item.scene().sigMouseMoved.connect(self._update_hover_coordinates)
 
+    def _add_hover_marker(self):
+        self.plot_item.addItem(self.hover_marker, ignoreBounds=True)
+
     def _update_hover_coordinates(self, scene_position):
         plot_bounds = self.plot_item.vb.sceneBoundingRect()
         if self.live_curve is None or not plot_bounds.contains(scene_position):
-            self.hover_label.hide()
+            self._hide_hover_coordinates()
             return
 
         cursor_coordinates = self.plot_item.vb.mapSceneToView(scene_position)
@@ -103,8 +115,12 @@ class graph_widget(QWidget):
         if self.snap_hover_to_data:
             coordinates = self._nearest_visible_data_point(*coordinates)
             if coordinates is None:
-                self.hover_label.hide()
+                self._hide_hover_coordinates()
                 return
+            self.hover_marker.setData([coordinates[0]], [coordinates[1]])
+            self.hover_marker.show()
+        else:
+            self.hover_marker.hide()
 
         x_value, y_value = coordinates
         self.hover_label.setText(
@@ -162,6 +178,7 @@ class graph_widget(QWidget):
 
     def _hide_hover_coordinates(self):
         self.hover_label.hide()
+        self.hover_marker.hide()
 
     def leaveEvent(self, event):
         self._hide_hover_coordinates()
@@ -289,6 +306,7 @@ class graph_widget(QWidget):
         self.plot_widget.setLabel("left", f"{y_label}")
         pen = pg.mkPen(color="#2f6f9f", width=2)
         self.live_curve = self.plot_widget.plot(x_array, y_array, pen=pen)
+        self._add_hover_marker()
 
     def _plot_dual_arrays_from_indexes(self, arrays, x_index, left_y_index, right_y_index):
         if x_index >= len(arrays):
@@ -352,6 +370,7 @@ class graph_widget(QWidget):
         self.right_view.addItem(self.right_curve)
         self._update_right_axis()
         self.right_view.autoRange()
+        self._add_hover_marker()
 
     def _setup_right_axis(self):
         self.right_view = pg.ViewBox()
