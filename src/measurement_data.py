@@ -34,6 +34,11 @@ class AuroraStepCompleted:
     segment: MeasurementSegment
 
 
+@dataclass(frozen=True)
+class LiveMeasurementStarted:
+    pass
+
+
 @dataclass
 class LogicalMeasurementRun:
     title: str

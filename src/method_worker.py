@@ -7,7 +7,12 @@ from PySide6.QtCore import QObject, Signal, Slot
 import pypalmsens as ps
 
 from aurora_method_builder.methods import AuroraStepwiseMethod
-from src.measurement_data import AuroraStepCompleted, LogicalMeasurementRun, MeasurementSegment
+from src.measurement_data import (
+    AuroraStepCompleted,
+    LiveMeasurementStarted,
+    LogicalMeasurementRun,
+    MeasurementSegment,
+)
 from src.temperature_chamber.temperature_controller import TemperatureController, TemperatureProgress
 
 
@@ -57,6 +62,7 @@ class measurement_worker(QObject):
             def on_data(data):
                 self.progress.emit(data)
 
+            self.progress.emit(LiveMeasurementStarted())
             return await manager.measure(self.method, callback=on_data)
 
     async def _measure_aurora_stepwise(self, manager, stepwise_method: AuroraStepwiseMethod):
@@ -95,6 +101,7 @@ class measurement_worker(QObject):
                 method = ps.MethodScript(script=action.methodscript)
                 manager.validate_method(method)
                 segment_offset_s = time.monotonic() - run_start
+                self.progress.emit(LiveMeasurementStarted())
                 measurement = await manager.measure(method, callback=on_data)
                 segment = MeasurementSegment(
                     index=len(run.segments) + 1,

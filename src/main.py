@@ -48,7 +48,11 @@ from PySide6.QtWidgets import (
 )
 
 from src.graph import graph_panel
-from src.measurement_data import AuroraStepCompleted, LogicalMeasurementRun
+from src.measurement_data import (
+    AuroraStepCompleted,
+    LiveMeasurementStarted,
+    LogicalMeasurementRun,
+)
 from src.method_config import METHOD_ORDER, METHOD_SPECS, build_method
 from src.method_worker import measurement_worker
 from src.temperature_chamber.temperature_controller import TemperatureProgress, TemperatureSettings
@@ -1445,6 +1449,9 @@ class main_window(QMainWindow):
     def handle_worker_progress(self, worker, callback_data):
         panel = self.worker_panels.get(worker)
         if panel is None or panel not in self.panels:
+            return
+        if isinstance(callback_data, LiveMeasurementStarted):
+            panel.graph.begin_live_measurement()
             return
         if isinstance(callback_data, AuroraStepCompleted):
             self.auto_save_aurora_step_bdf(worker, panel, callback_data.segment)
