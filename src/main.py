@@ -636,8 +636,9 @@ class method_configuration_dialog(QDialog):
         }
 
     def run_channel(self) -> int:
-        if self.instrument is not None and getattr(self.instrument, "channel", -1) > 0:
-            return self.instrument.channel - 1
+        # run channel will always be 0 as each channel is its own single channel device
+        # if self.instrument is not None and getattr(self.instrument, "channel", -1) > 0:
+        #    return self.instrument.channel - 1
         return 0
 
     def update_additional_measurements(self):
