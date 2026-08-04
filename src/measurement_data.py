@@ -428,6 +428,8 @@ def _canonical_array_name(name: str, array_type: str, quantity: str) -> str | No
 
     if normalized.intersection({"time", "testtime", "elapsedtime"}):
         return "Time"
+    if normalized.intersection({"potentialwevsce", "wevscepotential"}):
+        return "PotentialWEvsCE"
     if normalized.intersection({"potential", "appliedpotential", "voltage", "appliedvoltage"}):
         return "Potential"
     if normalized.intersection({"current", "appliedcurrent"}):
