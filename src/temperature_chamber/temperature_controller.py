@@ -106,6 +106,10 @@ class TemperatureController:
     def request_temperature(self):
         self._write("T\n")
 
+    def poll_status(self) -> TemperatureStatus | None:
+        self.request_temperature()
+        return self.read_status()
+
     def read_status(self) -> TemperatureStatus | None:
         if self.serial is None:
             raise RuntimeError("Temperature controller is not connected.")
@@ -144,8 +148,7 @@ class TemperatureController:
             if self.settings.timeout_s is not None and elapsed > self.settings.timeout_s:
                 raise RuntimeError("Temperature step timed out.")
 
-            self.request_temperature()
-            status = self.read_status()
+            status = self.poll_status()
             if status is None:
                 continue
 

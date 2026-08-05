@@ -12,6 +12,7 @@ from src.measurement_data import (
     LiveMeasurementStarted,
     LogicalMeasurementRun,
     MeasurementSegment,
+    TemperatureSample,
 )
 from src.temperature_chamber.temperature_controller import TemperatureController, TemperatureProgress
 
@@ -62,8 +63,30 @@ class measurement_worker(QObject):
             def on_data(data):
                 self.progress.emit(data)
 
-            self.progress.emit(LiveMeasurementStarted())
-            return await manager.measure(self.method, callback=on_data)
+            temperature_controller = self._connect_temperature_controller()
+            try:
+                self.progress.emit(LiveMeasurementStarted())
+                measurement, temperature_samples = await self._measure_palmsens(
+                    manager,
+                    self.method,
+                    on_data,
+                    temperature_controller,
+                )
+            finally:
+                if temperature_controller is not None:
+                    temperature_controller.close()
+
+            if temperature_controller is None:
+                return measurement
+
+            title = getattr(measurement, "title", None) or type(self.method).__name__
+            segment = MeasurementSegment(
+                index=1,
+                label=title,
+                source=measurement,
+                temperature_samples=temperature_samples,
+            )
+            return LogicalMeasurementRun(title, [segment])
 
     async def _measure_aurora_stepwise(self, manager, stepwise_method: AuroraStepwiseMethod):
         actions = stepwise_method.render_actions()
@@ -72,13 +95,10 @@ class measurement_worker(QObject):
 
         run = LogicalMeasurementRun(stepwise_method.name)
         run_start = time.monotonic()
-        temperature_controller = None
 
-        if any(action.is_temperature for action in actions):
-            if self.temperature_settings is None:
-                raise RuntimeError("This Aurora method contains temperature steps, but the chamber is not enabled.")
-            temperature_controller = TemperatureController(self.temperature_settings)
-            temperature_controller.connect()
+        if any(action.is_temperature for action in actions) and self.temperature_settings is None:
+            raise RuntimeError("This Aurora method contains temperature steps, but the chamber is not enabled.")
+        temperature_controller = self._connect_temperature_controller()
 
         def on_data(data):
             self.progress.emit(data)
@@ -102,7 +122,12 @@ class measurement_worker(QObject):
                 manager.validate_method(method)
                 segment_offset_s = time.monotonic() - run_start
                 self.progress.emit(LiveMeasurementStarted())
-                measurement = await manager.measure(method, callback=on_data)
+                measurement, temperature_samples = await self._measure_palmsens(
+                    manager,
+                    method,
+                    on_data,
+                    temperature_controller,
+                )
                 segment = MeasurementSegment(
                     index=len(run.segments) + 1,
                     label=action.label,
@@ -111,6 +136,7 @@ class measurement_worker(QObject):
                     source_step_index=action.source_step_index,
                     step_type=action.step_type,
                     execution_index=action.execution_index,
+                    temperature_samples=temperature_samples,
                 )
                 run.add_segment(segment)
                 self.progress.emit(AuroraStepCompleted(segment))
@@ -121,6 +147,72 @@ class measurement_worker(QObject):
         if not run.segments:
             raise RuntimeError("Aurora step-wise execution completed without measurement data.")
         return run
+
+    def _connect_temperature_controller(self) -> TemperatureController | None:
+        if self.temperature_settings is None:
+            return None
+
+        controller = TemperatureController(self.temperature_settings)
+        controller.connect()
+        return controller
+
+    async def _measure_palmsens(
+        self,
+        manager,
+        method,
+        callback,
+        temperature_controller: TemperatureController | None,
+    ):
+        # Pathway 1: temperature chamber is not enabled
+        if temperature_controller is None:
+            measurement = await manager.measure(method, callback=callback)
+            return measurement, ()
+
+        # Pathway 2: temperature chamber is enabled --> poll temperature and setpoint and store
+        samples: list[TemperatureSample] = []
+        stop_polling = threading.Event()
+        measurement_started_at = time.monotonic()
+        polling_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._poll_temperature,
+                temperature_controller,
+                stop_polling,
+                measurement_started_at,
+                samples,
+            )
+        )
+
+        try:
+            measurement = await manager.measure(method, callback=callback)
+        finally:
+            stop_polling.set()
+            await polling_task
+
+        return measurement, tuple(samples)
+
+    @staticmethod
+    def _poll_temperature(
+        controller: TemperatureController,
+        stop_polling: threading.Event,
+        measurement_started_at: float,
+        samples: list[TemperatureSample],
+    ):
+        while True:
+            poll_started_at = time.monotonic()
+            status = controller.poll_status()
+            if status is not None:
+                samples.append(
+                    TemperatureSample(
+                        elapsed_s=time.monotonic() - measurement_started_at,
+                        temperature_c=status.temperature_c,
+                        setpoint_c=status.setpoint_c,
+                    )
+                )
+
+            poll_duration = time.monotonic() - poll_started_at
+            wait_s = max(0.0, controller.settings.poll_interval_s - poll_duration)
+            if stop_polling.wait(wait_s):
+                return
 
     # TODO: current architecture hardwires temperature chamber
     # solution: possibly switch to general implementation and non native steps as  modules
