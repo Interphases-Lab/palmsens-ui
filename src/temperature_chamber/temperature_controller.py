@@ -25,7 +25,6 @@ class TemperatureSettings:
     baud_rate: int = 9600
     tolerance_c: float = 0.5
     poll_interval_s: float = 1.0 # check poll interval vs timeu
-    timeout_s: float | None = None
     log_dir: str | None = None
     stop_on_abort: bool = True
 
@@ -144,10 +143,6 @@ class TemperatureController:
                 raise RuntimeError("Temperature step aborted.")
 
             now = time.monotonic()
-            elapsed = now - started_at
-            if self.settings.timeout_s is not None and elapsed > self.settings.timeout_s:
-                raise RuntimeError("Temperature step timed out.")
-
             status = self.poll_status()
             if status is None:
                 continue

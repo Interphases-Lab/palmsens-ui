@@ -11,7 +11,9 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QMessageBox,
     QFrame,
-    QSizePolicy
+    QMenu,
+    QSizePolicy,
+    QToolButton,
 )
 from PySide6.QtCore import Signal, Qt, QSize
 from PySide6.QtGui import QAction
@@ -87,9 +89,14 @@ class graph_widget(QWidget):
         self.plot_widget.getAxis("bottom").setTextPen("#56616f")
         self.plot_widget.getAxis("left").setTextPen("#56616f")
         self.plot_item = self.plot_widget.getPlotItem()
+        self.set_rectangle_zoom_enabled(False)
         self._setup_right_axis()
         self._setup_hover_coordinates()
         layout.addWidget(self.plot_widget)
+
+    def set_rectangle_zoom_enabled(self, enabled: bool):
+        mouse_mode = pg.ViewBox.RectMode if enabled else pg.ViewBox.PanMode
+        self.plot_item.vb.setMouseMode(mouse_mode)
 
     def _setup_hover_coordinates(self):
         self.hover_marker = pg.ScatterPlotItem(
@@ -592,6 +599,7 @@ class graph_panel(QFrame):
     run_requested = Signal()
     stop_requested = Signal()
     expand_requested = Signal(bool)
+    selection_requested = Signal()
 
     def __init__(self, title, instrument=None):
         super().__init__()
@@ -629,25 +637,60 @@ class graph_panel(QFrame):
         self.stop_action = QAction("Stop", self)
         self.expand_action = QAction("Expand", self)
         self.expand_action.setCheckable(True)
+        self.zoom_area_action = QAction("Zoom Area", self)
+        self.zoom_area_action.setCheckable(True)
+        self.zoom_area_action.setToolTip("Select an area to zoom; turn off to pan")
         self.axes_action = QAction("Edit Axes", self)
-        self.nearest_point_action = QAction("Nearest Point", self)
-        self.nearest_point_action.setCheckable(True)
-        self.nearest_point_action.setToolTip(
+        self.highlight_points_action = QAction("Highlight Points", self)
+        self.highlight_points_action.setCheckable(True)
+        self.highlight_points_action.setToolTip(
             "Snap hover values to the nearest visible point on the primary curve"
         )
+
+        self.view_menu = QMenu(self)
+        self.view_menu.addAction(self.zoom_area_action)
+        self.view_menu.addAction(self.highlight_points_action)
+        self.view_action = QAction("View", self)
+        self.view_action.setMenu(self.view_menu)
 
         self.toolbar.addAction(self.run_action)
         self.toolbar.addAction(self.stop_action)
         self.toolbar.addAction(self.expand_action)
         self.toolbar.addAction(self.axes_action)
-        self.toolbar.addAction(self.nearest_point_action)
+        self.toolbar.addAction(self.view_action)
+        view_button = self.toolbar.widgetForAction(self.view_action)
+        if isinstance(view_button, QToolButton):
+            view_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.toolbar.actionTriggered.connect(lambda _action: self.selection_requested.emit())
+        self.view_menu.triggered.connect(lambda _action: self.selection_requested.emit())
+        self.graph.plot_item.scene().sigMouseClicked.connect(
+            lambda _event: self.selection_requested.emit()
+        )
+
+        overflow_button = self.toolbar.findChild(QToolButton, "qt_toolbar_ext_button")
+        if overflow_button is not None:
+            overflow_button.setArrowType(Qt.ArrowType.NoArrow)
+            overflow_button.setText("...")
+            overflow_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            overflow_button.setToolTip("More graph actions")
 
         self.run_action.triggered.connect(self.run_requested.emit)
         self.stop_action.triggered.connect(self.stop_requested.emit)
         self.expand_action.toggled.connect(self.expand_requested.emit)
+        self.zoom_area_action.toggled.connect(self.graph.set_rectangle_zoom_enabled)
         self.axes_action.triggered.connect(self.edit_axes)
-        self.nearest_point_action.toggled.connect(self.graph.set_snap_hover_to_data)
+        self.highlight_points_action.toggled.connect(self.graph.set_snap_hover_to_data)
         self.set_running(False)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.selection_requested.emit()
+        super().mousePressEvent(event)
+
+    def set_selected(self, is_selected: bool):
+        self.setProperty("selected", is_selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def set_running(self, is_running: bool):
         self.run_action.setEnabled(not is_running)

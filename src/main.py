@@ -19,6 +19,7 @@ from aurora_method_builder.methods import (
 )
 
 from src.bdf_export import BdfExportError, bdf_optional_quantity_choices, export_measurement_to_bdf_files
+from src.channel_status import ChannelStatusSnapshot, ChannelStatusWorker
 from PySide6.QtCore import QObject, QSize, Signal, Slot, Qt, QThread, QProcess
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
@@ -450,9 +451,6 @@ class method_configuration_dialog(QDialog):
             self.aurora_device_combo.addItem(label, value)
         self.package_run_form.addRow("PalmSens target", self.aurora_device_combo)
 
-        self.aurora_channel_label = QLabel(str(self.run_channel()), self.package_widget)
-        self.package_run_form.addRow("Channel", self.aurora_channel_label)
-
         self.aurora_scan_step_edit = QLineEdit("", self.package_widget)
         self.package_run_form.addRow("Scan step voltage (V)", self.aurora_scan_step_edit)
 
@@ -547,22 +545,11 @@ class method_configuration_dialog(QDialog):
         self.temperature_form.setVerticalSpacing(8)
         package_layout.addLayout(self.temperature_form)
 
-        self.temperature_port_edit = QLineEdit("", self.package_widget)
-        self.temperature_port_edit.setPlaceholderText("COM31 or blank for auto-detect")
-        self.temperature_form.addRow("Serial port", self.temperature_port_edit)
-
-        self.temperature_baud_edit = QLineEdit("9600", self.package_widget)
-        self.temperature_form.addRow("Baud rate", self.temperature_baud_edit)
-
         self.temperature_tolerance_edit = QLineEdit("0.5", self.package_widget)
         self.temperature_form.addRow("Tolerance (degC)", self.temperature_tolerance_edit)
 
         self.temperature_poll_interval_edit = QLineEdit("1.0", self.package_widget)
         self.temperature_form.addRow("Poll interval (s)", self.temperature_poll_interval_edit)
-
-        self.temperature_timeout_edit = QLineEdit("", self.package_widget)
-        self.temperature_timeout_edit.setPlaceholderText("Blank = no timeout")
-        self.temperature_form.addRow("Timeout (s)", self.temperature_timeout_edit)
 
         default_log_dir = Path(__file__).parent.parent / "out2" / "temp_logs"
         self.temperature_log_dir_edit = QLineEdit(str(default_log_dir), self.package_widget)
@@ -659,11 +646,8 @@ class method_configuration_dialog(QDialog):
     def update_temperature_fields(self):
         enabled = self.temperature_enabled_checkbox.isChecked()
         for widget in (
-            self.temperature_port_edit,
-            self.temperature_baud_edit,
             self.temperature_tolerance_edit,
             self.temperature_poll_interval_edit,
-            self.temperature_timeout_edit,
             self.temperature_log_dir_edit,
             self.temperature_stop_on_abort_checkbox,
         ):
@@ -715,20 +699,14 @@ class method_configuration_dialog(QDialog):
 
         tolerance_c = self.parse_float(self.temperature_tolerance_edit, "Temperature tolerance")
         poll_interval_s = self.parse_float(self.temperature_poll_interval_edit, "Temperature poll interval")
-        timeout_s = self.parse_optional_float(self.temperature_timeout_edit, "Temperature timeout")
         if tolerance_c <= 0:
             raise ValueError("Temperature tolerance must be greater than 0.")
         if poll_interval_s <= 0:
             raise ValueError("Temperature poll interval must be greater than 0.")
-        if timeout_s is not None and timeout_s <= 0:
-            raise ValueError("Temperature timeout must be greater than 0.")
 
         return TemperatureSettings(
-            port=self.temperature_port_edit.text().strip() or None,
-            baud_rate=self.parse_int(self.temperature_baud_edit, "Temperature baud rate"),
             tolerance_c=tolerance_c,
             poll_interval_s=poll_interval_s,
-            timeout_s=timeout_s,
             log_dir=self.temperature_log_dir_edit.text().strip() or None,
             stop_on_abort=self.temperature_stop_on_abort_checkbox.isChecked(),
         )
@@ -917,8 +895,7 @@ class method_configuration_dialog(QDialog):
         source_name = self.imported_package_path.name if self.imported_package_path is not None else "Unknown"
         return (
             f"Package: {self.imported_package.name}\n"
-            f"Source file: {source_name}\n"
-            f"Run channel for this panel: {self.run_channel()}"
+            f"Source file: {source_name}"
         )
 
     @staticmethod
@@ -1022,6 +999,11 @@ class main_window(QMainWindow):
         self.worker_bdf_auto_save_sequences: dict[measurement_worker, set[int]] = {}
         self.worker_bdf_auto_save_failed: set[measurement_worker] = set()
         self.thread_panels: dict[QThread, graph_panel] = {}
+        self.selected_panel: graph_panel | None = None
+        self.channel_statuses: dict[graph_panel, ChannelStatusSnapshot] = {}
+        self.channel_status_thread: QThread | None = None
+        self.channel_status_worker: ChannelStatusWorker | None = None
+        self.pending_status_panel: graph_panel | None = None
 
         self.setWindowTitle("Palmsens demo")
         self.resize(1200, 760)
@@ -1083,6 +1065,10 @@ class main_window(QMainWindow):
             "Use a mock 9-channel test device when scanning"
         )
         toolbar.addWidget(self.debug_device_checkbox)
+
+        self.channel_status_label = QLabel("Select a channel to view its status", self)
+        self.channel_status_label.setObjectName("channelStatus")
+        self.statusBar().addPermanentWidget(self.channel_status_label, 1)
 
         self.connection_indicator = connection_indicator()
         self.statusBar().addPermanentWidget(self.connection_indicator)
@@ -1161,6 +1147,14 @@ class main_window(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
+        self.pending_status_panel = None
+        if not self._stop_channel_status_monitor(wait=True):
+            QMessageBox.warning(
+                self,
+                "Disconnect failed",
+                "Could not stop channel status monitoring. Try again.",
+            )
+            return
         self.device_manager.disconnect_device()
 
     def update_connection(self, is_connected: bool):
@@ -1183,6 +1177,7 @@ class main_window(QMainWindow):
             self.add_panel(self._panel_title(instrument), instrument=instrument)
 
     def on_disconnect(self):
+        self.clear_panel_selection()
         self.connection_indicator.set_status(False)
         self.clear_panels()
 
@@ -1305,12 +1300,165 @@ class main_window(QMainWindow):
         panel = graph_panel(title, instrument=instrument)
         panel.run_requested.connect(lambda panel=panel: self.run_measurement(panel))
         panel.stop_requested.connect(lambda panel=panel: self.stop_measurement(panel))
+        panel.selection_requested.connect(lambda panel=panel: self.select_panel(panel))
         panel.expand_requested.connect(
             lambda is_expanded, panel=panel: self.set_panel_expanded(panel, is_expanded)
         )
         self.panels.append(panel)
         self.refresh_panel_grid()
         return panel
+
+    def select_panel(self, panel: graph_panel):
+        if panel not in self.panels:
+            return
+
+        if self.selected_panel is panel:
+            if self.channel_status_worker is None and panel not in self.active_runs:
+                self.pending_status_panel = panel
+                self._start_pending_channel_status_monitor()
+            return
+
+        if self.selected_panel is not None:
+            self.selected_panel.set_selected(False)
+
+        self.selected_panel = panel
+        panel.set_selected(True)
+        if panel in self.active_runs:
+            self.channel_status_label.setText(f"{panel.base_title} | Measurement running")
+        else:
+            self._show_selected_channel_status()
+
+        self.pending_status_panel = panel
+        if self.channel_status_worker is None:
+            self._start_pending_channel_status_monitor()
+        else:
+            self.channel_status_worker.request_stop()
+
+    def clear_panel_selection(self):
+        self.pending_status_panel = None
+        self._stop_channel_status_monitor(wait=True)
+        if self.selected_panel is not None:
+            self.selected_panel.set_selected(False)
+        self.selected_panel = None
+        self.channel_statuses.clear()
+        self.channel_status_label.setText("Select a channel to view its status")
+
+    def _start_pending_channel_status_monitor(self):
+        if self.channel_status_worker is not None:
+            return
+
+        panel = self.pending_status_panel
+        if panel is None or panel is not self.selected_panel or panel not in self.panels:
+            self.pending_status_panel = None
+            return
+        if panel in self.active_runs:
+            return
+
+        instrument = panel.instrument
+        self.pending_status_panel = None
+        if instrument is None:
+            self.channel_status_label.setText(f"{panel.base_title} | No channel assigned")
+            return
+        if getattr(instrument, "interface", None) == "mock":
+            self.channel_status_label.setText(f"{panel.base_title} | Status unavailable for mock device")
+            return
+
+        worker = ChannelStatusWorker(instrument)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.status_received.connect(
+            lambda status, worker=worker, panel=panel: self._handle_channel_status(
+                worker,
+                panel,
+                status,
+            )
+        )
+        worker.failed.connect(
+            lambda error, worker=worker, panel=panel: self._handle_channel_status_failure(
+                worker,
+                panel,
+                error,
+            )
+        )
+        thread.finished.connect(
+            lambda thread=thread: self._handle_channel_status_thread_finished(thread)
+        )
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        self.channel_status_worker = worker
+        self.channel_status_thread = thread
+        if panel not in self.channel_statuses:
+            self.channel_status_label.setText(f"{panel.base_title} | Connecting...")
+        thread.start()
+
+    def _stop_channel_status_monitor(self, *, wait: bool = False) -> bool:
+        worker = self.channel_status_worker
+        thread = self.channel_status_thread
+        if worker is None or thread is None:
+            return True
+
+        worker.request_stop()
+        if not wait or not thread.isRunning():
+            return True
+        if not thread.wait(5000):
+            return False
+
+        if self.channel_status_thread is thread:
+            self.channel_status_worker = None
+            self.channel_status_thread = None
+        return True
+
+    def _handle_channel_status(
+        self,
+        worker: ChannelStatusWorker,
+        panel: graph_panel,
+        status: ChannelStatusSnapshot,
+    ):
+        if worker is not self.channel_status_worker:
+            return
+        self.channel_statuses[panel] = status
+        if panel is self.selected_panel:
+            self._show_selected_channel_status()
+
+    def _handle_channel_status_failure(
+        self,
+        worker: ChannelStatusWorker,
+        panel: graph_panel,
+        error: str,
+    ):
+        if worker is self.channel_status_worker and panel is self.selected_panel:
+            self.channel_status_label.setText(
+                f"{panel.base_title} | Status unavailable: {error}"
+            )
+
+    def _handle_channel_status_thread_finished(self, thread: QThread):
+        if thread is not self.channel_status_thread:
+            return
+        self.channel_status_worker = None
+        self.channel_status_thread = None
+        self._start_pending_channel_status_monitor()
+
+    def _show_selected_channel_status(self):
+        panel = self.selected_panel
+        if panel is None:
+            self.channel_status_label.setText("Select a channel to view its status")
+            return
+
+        status = self.channel_statuses.get(panel)
+        if status is None:
+            self.channel_status_label.setText(f"{panel.base_title} | Waiting for status...")
+            return
+
+        parts = [
+            panel.base_title,
+            status.device_state,
+            f"Potential: {status.potential_v:.3f} V",
+        ]
+        if status.current_ua is not None:
+            parts.append(f"Current: {status.current_ua:.3f} µA")
+        self.channel_status_label.setText(" | ".join(parts))
 
     def set_panel_expanded(self, panel: graph_panel, is_expanded: bool):
         if panel not in self.panels:
@@ -1356,6 +1504,7 @@ class main_window(QMainWindow):
             panel.deleteLater()
 
     def run_measurement(self, panel: graph_panel):
+        self.select_panel(panel)
         if panel.instrument is None:
             QMessageBox.warning(
                 self,
@@ -1384,6 +1533,15 @@ class main_window(QMainWindow):
                     f"Could not create BDF auto-save folder:\n{exc}",
                 )
                 return
+
+        self.pending_status_panel = None
+        if not self._stop_channel_status_monitor(wait=True):
+            QMessageBox.warning(
+                self,
+                "Channel busy",
+                "Could not pause channel status monitoring. Try running again.",
+            )
+            return
         self.start_measurement(
             panel,
             method,
@@ -1427,6 +1585,8 @@ class main_window(QMainWindow):
         self.active_runs[panel] = (thread, worker)
         panel.set_running(True)
         panel.set_status_text("Running")
+        if panel is self.selected_panel:
+            self.channel_status_label.setText(f"{panel.base_title} | Measurement running")
         self.statusBar().showMessage(f"Running {method_label} on {panel.base_title}...", 0)
         thread.start()
 
@@ -1581,6 +1741,16 @@ class main_window(QMainWindow):
         self.stopping_panels.discard(panel)
         if panel in self.panels:
             panel.set_running(False)
+        if panel is self.selected_panel:
+            self._resume_selected_channel_status()
+
+    def _resume_selected_channel_status(self):
+        panel = self.selected_panel
+        if panel is None or panel in self.active_runs:
+            return
+        self.channel_status_label.setText(f"{panel.base_title} | Waiting for idle status...")
+        self.pending_status_panel = panel
+        self._start_pending_channel_status_monitor()
 
     def _measurements(self):
         return [
@@ -1676,6 +1846,8 @@ class main_window(QMainWindow):
             event.ignore()
             return
 
+        self.pending_status_panel = None
+        self._stop_channel_status_monitor(wait=True)
         super().closeEvent(event)
 
 
