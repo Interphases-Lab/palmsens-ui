@@ -45,7 +45,8 @@ class AuroraStepCompleted:
 
 @dataclass(frozen=True)
 class LiveMeasurementStarted:
-    pass
+    run_title: str | None = None
+    segment: MeasurementSegment | None = None
 
 
 @dataclass

@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from PySide6.QtWidgets import (
     QWidget,
     QLabel,
@@ -16,7 +18,16 @@ from PySide6.QtGui import QAction
 import pyqtgraph as pg
 import numpy as np
 
-from src.measurement_data import DatasetView, dataset_arrays, default_axis_indexes, measurement_arrays, measurement_dataset_views
+from src.measurement_data import (
+    DatasetView,
+    LiveMeasurementStarted,
+    LogicalMeasurementRun,
+    MeasurementSegment,
+    dataset_arrays,
+    default_axis_indexes,
+    measurement_arrays,
+    measurement_dataset_views,
+)
 from src.widgets import NoScrollComboBox
 
 def _is_metadata_array_name(name):
@@ -36,6 +47,13 @@ class _LiveDataset:
     def arrays(self):
         return self._arrays
 
+
+class _LiveMeasurement:
+    def __init__(self, title, dataset):
+        self.title = title
+        self.dataset = dataset
+
+
 class graph_widget(QWidget):
     HOVER_LABEL_OFFSET = 12
     HOVER_LABEL_MARGIN = 4
@@ -51,6 +69,9 @@ class graph_widget(QWidget):
         self.live_dataset_views = []
         self.live_arrays = {}
         self.live_axis_selection = None
+        self.live_run: LogicalMeasurementRun | None = None
+        self.live_active_segment: MeasurementSegment | None = None
+        self.live_current_view: DatasetView | None = None
         self.live_curve = None
         self.right_view = None
         self.right_curve = None
@@ -170,18 +191,43 @@ class graph_widget(QWidget):
 
     def plot_measurement(self, measurement, selection=None):
         self.measurement = measurement
-        self.live_dataset_views = []
-        self.live_arrays = {}
-        self.live_axis_selection = None
+        self._clear_live_state()
         dataset_view = self._dataset_view_for_selection(measurement, selection)
         self._plot_dataset_view(dataset_view, selection)
 
-    def begin_live_measurement(self):
+    def begin_live_measurement(self, event: LiveMeasurementStarted | None = None):
+        event = event or LiveMeasurementStarted()
+        if event.segment is None:
+            self._clear_live_state()
+            self.dataset_view_id = None
+        else:
+            if self.live_run is None:
+                self._clear_live_state()
+                self.live_run = LogicalMeasurementRun(event.run_title or "Live run")
+                self.dataset_view_id = None
+            self.live_active_segment = event.segment
+            self.live_arrays = {}
+            self.live_current_view = None
+            self._refresh_live_dataset_views()
+
         self.measurement = None
+
+    def complete_live_segment(self, segment: MeasurementSegment):
+        if self.live_run is None:
+            return
+
+        self.live_run.add_segment(segment)
+        self.live_active_segment = None
+        self._refresh_live_dataset_views()
+        self._plot_selected_live_view()
+
+    def _clear_live_state(self):
         self.live_dataset_views = []
         self.live_arrays = {}
         self.live_axis_selection = None
-        self.dataset_view_id = None
+        self.live_run = None
+        self.live_active_segment = None
+        self.live_current_view = None
 
     def _plot_dataset_view(self, dataset_view, selection=None):
         arrays = dataset_arrays(dataset_view.dataset) if dataset_view is not None else []
@@ -246,8 +292,15 @@ class graph_widget(QWidget):
         if dataset_view is None:
             return
 
-        self.live_dataset_views = [dataset_view]
+        self.live_current_view = dataset_view
+        self._refresh_live_dataset_views()
+        self._plot_selected_live_view()
+
+    def _plot_selected_live_view(self):
         selection = self.live_axis_selection
+        dataset_view = self._dataset_view_from_views(self.live_dataset_views, selection)
+        if dataset_view is None:
+            return
         if selection and selection.get("dataset_id") != dataset_view.id:
             selection = None
         self._plot_dataset_view(dataset_view, selection)
@@ -257,20 +310,61 @@ class graph_widget(QWidget):
         dataset_view = self._dataset_view_from_views(self.live_dataset_views, selection)
         self._plot_dataset_view(dataset_view, selection)
 
+    def _refresh_live_dataset_views(self):
+        views = self._accumulated_live_dataset_views()
+        if self.live_current_view is not None:
+            views.append(self.live_current_view)
+        self.live_dataset_views = views
+
+    def _accumulated_live_dataset_views(self):
+        if self.live_run is None:
+            return []
+
+        segments = list(self.live_run.segments)
+        if (
+            self.live_active_segment is not None
+            and self.live_current_view is not None
+            and not self.live_current_view.is_eis
+        ):
+            live_source = _LiveMeasurement(
+                self.live_active_segment.label,
+                self.live_current_view.dataset,
+            )
+            segments.append(replace(self.live_active_segment, source=live_source))
+
+        live_run = LogicalMeasurementRun(
+            f"{self.live_run.title} (live)",
+            segments,
+        )
+        views = measurement_dataset_views(
+            live_run,
+            include_individual_eis=False,
+        )
+        titles = {
+            "measurement": "Entire run (live)",
+            "eis": "Entire run EIS (live)",
+        }
+        return [replace(view, title=titles.get(view.id, view.title)) for view in views]
+
     def _live_dataset_view(self, callback_data):
         x_array = getattr(callback_data, "x_array", None)
         y_array = getattr(callback_data, "y_array", None)
         if x_array is not None and y_array is not None:
             for data_array in (x_array, y_array):
                 self.live_arrays[self._live_array_key(data_array)] = data_array
-            dataset = _LiveDataset("Live Data", tuple(self.live_arrays.values()))
-            return DatasetView("live", "Live Data", dataset, callback_data)
+            dataset = _LiveDataset("Current step (live)", tuple(self.live_arrays.values()))
+            return DatasetView("live", "Current step (live)", dataset, callback_data)
 
         dataset = getattr(callback_data, "data", None)
         if dataset is None:
             return None
-        title = getattr(dataset, "title", None) or "Live EIS"
-        return DatasetView("eis_live", str(title), dataset, callback_data, is_eis=True)
+        return DatasetView(
+            "eis_live",
+            "Current step EIS (live)",
+            dataset,
+            callback_data,
+            is_eis=True,
+        )
 
     @staticmethod
     def _live_array_key(data_array):

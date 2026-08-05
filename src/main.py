@@ -1451,9 +1451,10 @@ class main_window(QMainWindow):
         if panel is None or panel not in self.panels:
             return
         if isinstance(callback_data, LiveMeasurementStarted):
-            panel.graph.begin_live_measurement()
+            panel.graph.begin_live_measurement(callback_data)
             return
         if isinstance(callback_data, AuroraStepCompleted):
+            panel.graph.complete_live_segment(callback_data.segment)
             self.auto_save_aurora_step_bdf(worker, panel, callback_data.segment)
             return
         if isinstance(callback_data, TemperatureProgress):

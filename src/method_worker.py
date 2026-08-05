@@ -1,5 +1,6 @@
 
 import asyncio
+from dataclasses import replace
 import threading
 import time
 
@@ -57,8 +58,7 @@ class measurement_worker(QObject):
             manager.validate_method(self.method)
 
             if abort_requested:
-                await manager.abort()
-                raise RuntimeError("Measurement aborted")
+                return LogicalMeasurementRun(type(self.method).__name__)
 
             def on_data(data):
                 self.progress.emit(data)
@@ -106,13 +106,15 @@ class measurement_worker(QObject):
         try:
             for action in actions:
                 if self._abort_requested():
-                    await manager.abort()
-                    if temperature_controller is not None and self.temperature_settings.stop_on_abort:
-                        temperature_controller.stop()
-                    raise RuntimeError("Measurement aborted")
+                    break
 
                 if action.is_temperature:
-                    await self._execute_temperature_action(temperature_controller, action)
+                    try:
+                        await self._execute_temperature_action(temperature_controller, action)
+                    except Exception:
+                        if not self._abort_requested():
+                            raise
+                        break
                     continue
 
                 if not action.is_palmsens or action.methodscript is None:
@@ -121,30 +123,49 @@ class measurement_worker(QObject):
                 method = ps.MethodScript(script=action.methodscript)
                 manager.validate_method(method)
                 segment_offset_s = time.monotonic() - run_start
-                self.progress.emit(LiveMeasurementStarted())
-                measurement, temperature_samples = await self._measure_palmsens(
-                    manager,
-                    method,
-                    on_data,
-                    temperature_controller,
-                )
                 segment = MeasurementSegment(
                     index=len(run.segments) + 1,
                     label=action.label,
-                    source=measurement,
+                    source=None,
                     elapsed_offset_s=segment_offset_s,
                     source_step_index=action.source_step_index,
                     step_type=action.step_type,
                     execution_index=action.execution_index,
+                )
+                self.progress.emit(
+                    LiveMeasurementStarted(
+                        run_title=run.title,
+                        segment=segment,
+                    )
+                )
+                try:
+                    measurement, temperature_samples = await self._measure_palmsens(
+                        manager,
+                        method,
+                        on_data,
+                        temperature_controller,
+                    )
+                except Exception:
+                    if not self._abort_requested():
+                        raise
+                    break
+                segment = replace(
+                    segment,
+                    source=measurement,
                     temperature_samples=temperature_samples,
                 )
                 run.add_segment(segment)
                 self.progress.emit(AuroraStepCompleted(segment))
+
+                if self._abort_requested():
+                    break
         finally:
             if temperature_controller is not None:
+                if self._abort_requested() and self.temperature_settings.stop_on_abort:
+                    temperature_controller.stop()
                 temperature_controller.close()
 
-        if not run.segments:
+        if not run.segments and not self._abort_requested():
             raise RuntimeError("Aurora step-wise execution completed without measurement data.")
         return run
 
