@@ -120,7 +120,7 @@ class bdf_export_dialog(QDialog):
         super().__init__(parent)
         self.file_type = "csv"
         self.setWindowTitle("Export BDF")
-        self.resize(640, 480)
+        self.resize(640, 620)
         self._checkboxes: list[tuple[QCheckBox, object]] = []
         self._quantity_checkboxes: list[tuple[QCheckBox, str]] = []
 
@@ -232,10 +232,8 @@ class bdf_export_dialog(QDialog):
         self.quantity_search_edit.setPlaceholderText("Search optional quantities")
         self.quantity_search_edit.setClearButtonEnabled(True)
         self.quantity_search_edit.textChanged.connect(self.filter_optional_quantities)
-        quantity_options_layout.addWidget(self.quantity_search_edit)
 
-        quantity_actions = QWidget(self)
-        quantity_actions_layout = QHBoxLayout(quantity_actions)
+        quantity_actions_layout = QHBoxLayout()
         quantity_actions_layout.setContentsMargins(0, 0, 0, 0)
         quantity_actions_layout.setSpacing(8)
 
@@ -243,10 +241,10 @@ class bdf_export_dialog(QDialog):
         select_all_button.clicked.connect(self.select_all_optional_quantities)
         clear_button = QPushButton("Clear", self)
         clear_button.clicked.connect(self.clear_optional_quantities)
+        quantity_actions_layout.addWidget(self.quantity_search_edit, 1)
         quantity_actions_layout.addWidget(select_all_button)
         quantity_actions_layout.addWidget(clear_button)
-        quantity_actions_layout.addStretch(1)
-        quantity_options_layout.addWidget(quantity_actions)
+        quantity_options_layout.addLayout(quantity_actions_layout)
 
         self.quantity_container = QWidget(self)
         self.quantity_layout = QVBoxLayout(self.quantity_container)
@@ -267,7 +265,8 @@ class bdf_export_dialog(QDialog):
 
         quantity_scroll_area = QScrollArea(self)
         quantity_scroll_area.setWidgetResizable(True)
-        quantity_scroll_area.setMinimumHeight(280)
+        quantity_scroll_area.setMinimumHeight(100)
+        quantity_scroll_area.setMaximumHeight(160)
         quantity_scroll_area.setWidget(self.quantity_container)
         quantity_options_layout.addWidget(quantity_scroll_area, 1)
         self.quantity_options_widget.setVisible(False)
@@ -327,10 +326,6 @@ class bdf_export_dialog(QDialog):
         self.quantity_options_widget.setVisible(is_visible)
         arrow_type = Qt.ArrowType.DownArrow if is_visible else Qt.ArrowType.RightArrow
         self.quantity_toggle_button.setArrowType(arrow_type)
-        if is_visible:
-            self.resize(self.width(), max(self.height(), 720))
-        else:
-            self.adjustSize()
 
     def select_all_optional_quantities(self):
         for checkbox, _ in self._quantity_checkboxes:
@@ -1252,9 +1247,9 @@ class main_window(QMainWindow):
 
     def export_bdf(self):
         exportable_panels = self._exportable_panels()
-        if not exportable_panels:
-            QMessageBox.warning(self, "Export error", "No channel measurements available to export.")
-            return
+        # if not exportable_panels:
+            # QMessageBox.warning(self, "Export error", "No channel measurements available to export.")
+            # return
 
         dialog = bdf_export_dialog(exportable_panels, self)
         if not dialog.exec():
