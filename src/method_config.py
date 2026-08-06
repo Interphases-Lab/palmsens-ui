@@ -369,9 +369,5 @@ METHOD_SPECS: dict[str, MethodSpec] = {
 METHOD_ORDER = tuple(METHOD_SPECS.keys())
 
 
-def default_params(method_key: str) -> dict[str, str]:
-    return METHOD_SPECS[method_key].default_params()
-
-
 def build_method(method_key: str, raw_params: dict[str, str]) -> object:
     return METHOD_SPECS[method_key].build_method(raw_params)

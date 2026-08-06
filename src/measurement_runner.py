@@ -4,7 +4,7 @@ from dataclasses import replace
 import threading
 import time
 
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, Signal
 import pypalmsens as ps
 
 from aurora_method_builder.methods import AuroraStepwiseMethod
@@ -18,10 +18,8 @@ from src.measurement_data import (
 from src.temperature_chamber.temperature_controller import TemperatureController, TemperatureProgress
 
 
-class measurement_worker(QObject):
+class measurement_runner(QObject):
     progress = Signal(object)
-    finished = Signal(object)
-    failed = Signal(str)
 
     def __init__(self, instrument, method, temperature_settings=None):
         super().__init__()
@@ -33,20 +31,8 @@ class measurement_worker(QObject):
         self.abort_requested = False
         self._state_lock = threading.Lock()
 
-    @Slot()
-    def run(self):
+    async def measure_with_manager(self, manager):
         try:
-            measurement = asyncio.run(self._measure())
-            self.finished.emit(measurement)
-        except Exception as e:
-            self.failed.emit(str(e))
-        finally:
-            with self._state_lock:
-                self.manager = None
-                self.loop = None
-
-    async def _measure(self):
-        async with await ps.connect_async(instrument=self.instrument) as manager:
             with self._state_lock:
                 self.manager = manager
                 self.loop = asyncio.get_running_loop()
@@ -87,6 +73,10 @@ class measurement_worker(QObject):
                 temperature_samples=temperature_samples,
             )
             return LogicalMeasurementRun(title, [segment])
+        finally:
+            with self._state_lock:
+                self.manager = None
+                self.loop = None
 
     async def _measure_aurora_stepwise(self, manager, stepwise_method: AuroraStepwiseMethod):
         actions = stepwise_method.render_actions()
@@ -284,7 +274,6 @@ class measurement_worker(QObject):
             )
         )
 
-    @Slot()
     def abort(self):
         with self._state_lock:
             self.abort_requested = True
@@ -297,11 +286,3 @@ class measurement_worker(QObject):
     def _abort_requested(self) -> bool:
         with self._state_lock:
             return self.abort_requested
-
-
-def collect_params(form_layout, field_names):
-    params = {}
-    for field in field_names:
-        widget = form_layout[field]
-        params[field] = widget.text().strip()
-    return params
