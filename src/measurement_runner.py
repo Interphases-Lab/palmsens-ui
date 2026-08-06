@@ -208,9 +208,10 @@ class measurement_runner(QObject):
         measurement_started_at: float,
         samples: list[TemperatureSample],
     ):
-        while True:
-            poll_started_at = time.monotonic()
+        while not stop_polling.is_set():
             status = controller.poll_status()
+            if stop_polling.is_set():
+                return
             if status is not None:
                 samples.append(
                     TemperatureSample(
@@ -219,11 +220,6 @@ class measurement_runner(QObject):
                         setpoint_c=status.setpoint_c,
                     )
                 )
-
-            poll_duration = time.monotonic() - poll_started_at
-            wait_s = max(0.0, controller.settings.poll_interval_s - poll_duration)
-            if stop_polling.wait(wait_s):
-                return
 
     # TODO: current architecture hardwires temperature chamber
     # solution: possibly switch to general implementation and non native steps as  modules

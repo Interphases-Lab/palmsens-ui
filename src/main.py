@@ -548,9 +548,6 @@ class method_configuration_dialog(QDialog):
         self.temperature_tolerance_edit = QLineEdit("0.5", self.package_widget)
         self.temperature_form.addRow("Tolerance (degC)", self.temperature_tolerance_edit)
 
-        self.temperature_poll_interval_edit = QLineEdit("1.0", self.package_widget)
-        self.temperature_form.addRow("Poll interval (s)", self.temperature_poll_interval_edit)
-
         default_log_dir = Path(__file__).parent.parent / "out2" / "temp_logs"
         self.temperature_log_dir_edit = QLineEdit(str(default_log_dir), self.package_widget)
         self.temperature_form.addRow("Log directory", self.temperature_log_dir_edit)
@@ -647,7 +644,6 @@ class method_configuration_dialog(QDialog):
         enabled = self.temperature_enabled_checkbox.isChecked()
         for widget in (
             self.temperature_tolerance_edit,
-            self.temperature_poll_interval_edit,
             self.temperature_log_dir_edit,
             self.temperature_stop_on_abort_checkbox,
         ):
@@ -698,15 +694,11 @@ class method_configuration_dialog(QDialog):
             return None
 
         tolerance_c = self.parse_float(self.temperature_tolerance_edit, "Temperature tolerance")
-        poll_interval_s = self.parse_float(self.temperature_poll_interval_edit, "Temperature poll interval")
         if tolerance_c <= 0:
             raise ValueError("Temperature tolerance must be greater than 0.")
-        if poll_interval_s <= 0:
-            raise ValueError("Temperature poll interval must be greater than 0.")
 
         return TemperatureSettings(
             tolerance_c=tolerance_c,
-            poll_interval_s=poll_interval_s,
             log_dir=self.temperature_log_dir_edit.text().strip() or None,
             stop_on_abort=self.temperature_stop_on_abort_checkbox.isChecked(),
         )

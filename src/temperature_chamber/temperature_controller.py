@@ -17,6 +17,7 @@ except ImportError:
 
 
 _MODE_RE = re.compile(r"^\s*(?P<mode>HEATING|COOLING|ON TARGET)\b", re.IGNORECASE)
+_SERIAL_READ_TIMEOUT_S = 2.0
 
 
 @dataclass(frozen=True)
@@ -24,7 +25,6 @@ class TemperatureSettings:
     port: str | None = None
     baud_rate: int = 9600
     tolerance_c: float = 0.5
-    poll_interval_s: float = 1.0 # check poll interval vs timeu
     log_dir: str | None = None
     stop_on_abort: bool = True
 
@@ -74,7 +74,7 @@ class TemperatureController:
         self.serial = serial.Serial(
             port,
             self.settings.baud_rate,
-            timeout=self.settings.poll_interval_s,
+            timeout=_SERIAL_READ_TIMEOUT_S,
         )
         self.started_at = time.monotonic()
         self._open_log()
@@ -106,7 +106,8 @@ class TemperatureController:
         self._write("T\n")
 
     def poll_status(self) -> TemperatureStatus | None:
-        self.request_temperature()
+        # The firmware already emits a complete status line once per second.
+        # Requesting T here adds an extra non-status reply and can starve control commands.
         return self.read_status()
 
     def read_status(self) -> TemperatureStatus | None:
