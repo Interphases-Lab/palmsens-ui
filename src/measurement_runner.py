@@ -18,6 +18,11 @@ from src.measurement_data import (
 from src.temperature_chamber.temperature_controller import TemperatureController, TemperatureProgress
 
 
+_DEFAULT_TEMPERATURE_OCV_INTERVAL_S = 1.0
+# PalmSens methods need a finite duration. Target-reached steps abort this OCV early.
+_TARGET_REACHED_OCV_LIMIT_S = 24 * 60 * 60
+
+
 class measurement_runner(QObject):
     progress = Signal(object)
 
@@ -99,18 +104,12 @@ class measurement_runner(QObject):
                     break
 
                 if action.is_temperature:
-                    try:
-                        await self._execute_temperature_action(temperature_controller, action)
-                    except Exception:
-                        if not self._abort_requested():
-                            raise
-                        break
+                    method = self._temperature_ocv_method(stepwise_method, action)
+                elif action.is_palmsens and action.methodscript is not None:
+                    method = ps.MethodScript(script=action.methodscript)
+                else:
                     continue
 
-                if not action.is_palmsens or action.methodscript is None:
-                    continue
-
-                method = ps.MethodScript(script=action.methodscript)
                 manager.validate_method(method)
                 segment_offset_s = time.monotonic() - run_start
                 segment = MeasurementSegment(
@@ -129,12 +128,23 @@ class measurement_runner(QObject):
                     )
                 )
                 try:
-                    measurement, temperature_samples = await self._measure_palmsens(
-                        manager,
-                        method,
-                        on_data,
-                        temperature_controller,
-                    )
+                    if action.is_temperature:
+                        measurement, temperature_samples = (
+                            await self._execute_temperature_action(
+                                manager,
+                                method,
+                                on_data,
+                                temperature_controller,
+                                action,
+                            )
+                        )
+                    else:
+                        measurement, temperature_samples = await self._measure_palmsens(
+                            manager,
+                            method,
+                            on_data,
+                            temperature_controller,
+                        )
                 except Exception:
                     if not self._abort_requested():
                         raise
@@ -173,6 +183,8 @@ class measurement_runner(QObject):
         method,
         callback,
         temperature_controller: TemperatureController | None,
+        temperature_status_callback=None,
+        stop_when_temperature_status=None,
     ):
         # Pathway 1: temperature chamber is not enabled
         if temperature_controller is None:
@@ -182,6 +194,7 @@ class measurement_runner(QObject):
         # Pathway 2: temperature chamber is enabled --> poll temperature and setpoint and store
         samples: list[TemperatureSample] = []
         stop_polling = threading.Event()
+        temperature_complete = threading.Event()
         measurement_started_at = time.monotonic()
         polling_task = asyncio.create_task(
             asyncio.to_thread(
@@ -190,14 +203,34 @@ class measurement_runner(QObject):
                 stop_polling,
                 measurement_started_at,
                 samples,
+                temperature_status_callback,
+                stop_when_temperature_status,
+                temperature_complete,
             )
         )
 
+        completion_task = None
         try:
-            measurement = await manager.measure(method, callback=callback)
+            measurement_task = asyncio.create_task(manager.measure(method, callback=callback))
+            if stop_when_temperature_status is None:
+                measurement = await measurement_task
+            else:
+                completion_task = asyncio.create_task(
+                    asyncio.to_thread(temperature_complete.wait)
+                )
+                await asyncio.wait(
+                    (measurement_task, completion_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if temperature_complete.is_set() and not measurement_task.done():
+                    await manager.abort()
+                measurement = await measurement_task
         finally:
             stop_polling.set()
+            temperature_complete.set()
             await polling_task
+            if completion_task is not None:
+                await completion_task
 
         return measurement, tuple(samples)
 
@@ -207,6 +240,9 @@ class measurement_runner(QObject):
         stop_polling: threading.Event,
         measurement_started_at: float,
         samples: list[TemperatureSample],
+        status_callback,
+        stop_when_status,
+        completion_event: threading.Event,
     ):
         while not stop_polling.is_set():
             status = controller.poll_status()
@@ -220,10 +256,43 @@ class measurement_runner(QObject):
                         setpoint_c=status.setpoint_c,
                     )
                 )
+                if status_callback is not None:
+                    status_callback(status)
+                if stop_when_status is not None and stop_when_status(status):
+                    completion_event.set()
+                    return
 
-    # TODO: current architecture hardwires temperature chamber
-    # solution: possibly switch to general implementation and non native steps as  modules
-    async def _execute_temperature_action(self, temperature_controller, action):
+    @staticmethod
+    def _temperature_ocv_method(stepwise_method, action):
+        record = stepwise_method.protocol_json.get("record", {})
+        try:
+            interval_s = float(
+                record.get("time_s") or _DEFAULT_TEMPERATURE_OCV_INTERVAL_S
+            )
+        except (TypeError, ValueError):
+            interval_s = _DEFAULT_TEMPERATURE_OCV_INTERVAL_S
+        if interval_s <= 0:
+            interval_s = _DEFAULT_TEMPERATURE_OCV_INTERVAL_S
+
+        wait_s = max(float(action.wait_after_s or 0.0), interval_s)
+        run_time_s = (
+            wait_s
+            if action.wait_starts_immediately
+            else _TARGET_REACHED_OCV_LIMIT_S
+        )
+        return ps.OpenCircuitPotentiometry(
+            interval_time=interval_s,
+            run_time=run_time_s,
+        )
+
+    async def _execute_temperature_action(
+        self,
+        manager,
+        method,
+        callback,
+        temperature_controller,
+        action,
+    ):
         if temperature_controller is None:
             raise RuntimeError("Temperature chamber is not configured.")
 
@@ -247,28 +316,81 @@ class measurement_runner(QObject):
         temperature_controller.start()
         temperature_controller.set_target(target_c)
 
-        status = await asyncio.to_thread(
-            temperature_controller.wait_for_temperature_step,
-            target_c,
-            wait_s,
-            self._abort_requested,
-            self.progress.emit,
-            timer_starts_immediately=action.wait_starts_immediately,
+        started_at = time.monotonic()
+        wait_started_at = started_at if action.wait_starts_immediately else None
+        latest_status = None
+        temperature_step_complete = False
+
+        def handle_status(status):
+            nonlocal latest_status, wait_started_at, temperature_step_complete
+            latest_status = status
+            now = time.monotonic()
+
+            if not action.wait_starts_immediately:
+                error_c = abs(status.temperature_c - target_c)
+                if error_c <= temperature_controller.settings.tolerance_c:
+                    wait_started_at = wait_started_at or now
+                else:
+                    wait_started_at = None
+
+            wait_elapsed_s = (
+                now - wait_started_at if wait_started_at is not None else 0.0
+            )
+            temperature_step_complete = (
+                wait_started_at is not None and wait_elapsed_s >= wait_s
+            )
+            self.progress.emit(
+                TemperatureProgress(
+                    target_c=target_c,
+                    temperature_c=status.temperature_c,
+                    setpoint_c=status.setpoint_c,
+                    wait_elapsed_s=wait_elapsed_s,
+                    message=temperature_controller.progress_message(
+                        status,
+                        target_c,
+                        wait_elapsed_s,
+                        wait_s,
+                        action.wait_starts_immediately,
+                    ),
+                )
+            )
+
+        def target_wait_complete(_status):
+            return temperature_step_complete
+
+        measurement, samples = await self._measure_palmsens(
+            manager,
+            method,
+            callback,
+            temperature_controller,
+            temperature_status_callback=handle_status,
+            stop_when_temperature_status=(
+                None if action.wait_starts_immediately else target_wait_complete
+            ),
         )
+        if not action.wait_starts_immediately and not temperature_step_complete:
+            raise RuntimeError(
+                "Temperature did not stabilize before the 24-hour OCV safety limit."
+            )
+
         completion = (
             "Temperature timer completed"
             if action.wait_starts_immediately
             else "Temperature stabilized"
         )
+        temperature_c = latest_status.temperature_c if latest_status is not None else None
+        setpoint_c = latest_status.setpoint_c if latest_status is not None else None
+        suffix = f" at {temperature_c:.2f} C" if temperature_c is not None else ""
         self.progress.emit(
             TemperatureProgress(
                 target_c=target_c,
-                temperature_c=status.temperature_c,
-                setpoint_c=status.setpoint_c,
+                temperature_c=temperature_c,
+                setpoint_c=setpoint_c,
                 wait_elapsed_s=wait_s,
-                message=f"{completion} at {status.temperature_c:.2f} C",
+                message=f"{completion}{suffix}",
             )
         )
+        return measurement, samples
 
     def abort(self):
         with self._state_lock:

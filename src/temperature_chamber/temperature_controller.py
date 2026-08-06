@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 import re
 import time
-from typing import Callable
 
 try:
     import serial
@@ -102,9 +101,6 @@ class TemperatureController:
     def set_target(self, degc: float):
         self._write(f"P{degc:.2f}\n")
 
-    def request_temperature(self):
-        self._write("T\n")
-
     def poll_status(self) -> TemperatureStatus | None:
         # The firmware already emits a complete status line once per second.
         # Requesting T here adds an extra non-status reply and can starve control commands.
@@ -124,61 +120,6 @@ class TemperatureController:
 
         self._log(line)
         return self._parse_status(line)
-
-    def wait_for_temperature_step(
-        self,
-        target_c: float,
-        wait_s: float,
-        abort_check: Callable[[], bool],
-        progress_callback: Callable[[TemperatureProgress], None] | None = None,
-        timer_starts_immediately: bool = True,
-    ) -> TemperatureStatus:
-        """Wait for the step timer, optionally without requiring the target temperature."""
-        started_at = time.monotonic()
-        wait_started_at = started_at if timer_starts_immediately else None
-
-        while True:
-            if abort_check():
-                if self.settings.stop_on_abort:
-                    self.stop()
-                raise RuntimeError("Temperature step aborted.")
-
-            now = time.monotonic()
-            status = self.poll_status()
-            if status is None:
-                continue
-
-            if not timer_starts_immediately:
-                error_c = abs(status.temperature_c - target_c)
-                if error_c <= self.settings.tolerance_c:
-                    if wait_started_at is None:
-                        wait_started_at = now
-                else:
-                    wait_started_at = None
-
-            wait_elapsed_s = (
-                now - wait_started_at if wait_started_at is not None else 0.0
-            )
-
-            if progress_callback is not None:
-                progress_callback(
-                    TemperatureProgress(
-                        target_c=target_c,
-                        temperature_c=status.temperature_c,
-                        setpoint_c=status.setpoint_c,
-                        wait_elapsed_s=wait_elapsed_s,
-                        message=self._progress_message(
-                            status,
-                            target_c,
-                            wait_elapsed_s,
-                            wait_s,
-                            timer_starts_immediately,
-                        ),
-                    )
-                )
-
-            if wait_started_at is not None and wait_elapsed_s >= wait_s:
-                return status
 
     def _write(self, command: str):
         if self.serial is None:
@@ -206,7 +147,7 @@ class TemperatureController:
             raw_line=line,
         )
 
-    def _progress_message(
+    def progress_message(
         self,
         status: TemperatureStatus,
         target_c: float,
