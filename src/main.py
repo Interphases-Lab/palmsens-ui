@@ -1725,6 +1725,7 @@ class main_window(QMainWindow):
         if isinstance(callback_data, TemperatureProgress):
             panel.set_status_text(callback_data.message)
             self.statusBar().showMessage(f"{panel.base_title}: {callback_data.message}", 0)
+            panel.graph.plot_live_temperature(callback_data)
             return
         panel.graph.plot_live_data(callback_data)
 

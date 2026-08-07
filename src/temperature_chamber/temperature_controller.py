@@ -49,6 +49,7 @@ class TemperatureProgress:
     setpoint_c: float | None
     wait_elapsed_s: float
     message: str
+    measurement_elapsed_s: float | None = None
 
 
 class TemperatureController:
