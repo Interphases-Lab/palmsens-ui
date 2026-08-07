@@ -22,7 +22,7 @@ Some of the functionality includes:
 
 ## Temperature Chamber
 
-Temperature steps are non-Palsmens native steps and are handled directly by the app through `temperature_chamber/temperature_controller.py`. Enable the Arduino temperature chamber in the Aurora package run dialog, choose the serial settings, then run the method normally.
+Temperature steps are coordinated directly by the app through `temperature_chamber/temperature_controller.py`. Enable the Arduino temperature chamber in the Aurora package run dialog, then run the method normally. While the chamber ramps or waits, the PalmSens channel runs open-circuit potentiometry so voltage and chamber temperature continue to be recorded and plotted as a normal step.
 
 Leave the serial port blank to auto-detect Arduino USB serial devices, or enter a port such as `COM31`.
 

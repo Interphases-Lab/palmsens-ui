@@ -1,11 +1,16 @@
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, get_args
 
 import pypalmsens as ps
+from pypalmsens.types import AllowedCurrentRanges
 
 
 Parser = Callable[[str], Any]
 Builder = Callable[[dict[str, Any]], object]
+
+
+CURRENT_RANGE_OPTIONS: tuple[str, ...] = get_args(AllowedCurrentRanges)
+CURRENT_RANGE_FIELD_KEYS = frozenset({"current_range", "applied_current_range"})
 
 
 @dataclass()

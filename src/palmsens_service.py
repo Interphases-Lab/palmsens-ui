@@ -24,6 +24,7 @@ class palmsens_connection_service(QObject):
         self._stop_requested = threading.Event()
         self._instruments = []
         self._managers = {}
+        self._current_range_options = {}
         self._runners = {}
         self._pending_aborts = set()
         self._runner_lock = threading.Lock()
@@ -39,6 +40,7 @@ class palmsens_connection_service(QObject):
         self._instruments = list(instruments)
         self._stop_requested = threading.Event()
         self._managers.clear()
+        self._current_range_options.clear()
         with self._runner_lock:
             self._runners.clear()
             self._pending_aborts.clear()
@@ -83,6 +85,10 @@ class palmsens_connection_service(QObject):
                 return
         runner.abort()
 
+    def current_range_options(self, instrument):
+        options = self._current_range_options.get(id(instrument), {})
+        return {field_key: tuple(values) for field_key, values in options.items()}
+
     def _run(self):
         try:
             asyncio.run(self._serve())
@@ -113,6 +119,20 @@ class palmsens_connection_service(QObject):
             try:
                 manager = await ps.connect_async(instrument=instrument)
                 self._managers[id(instrument)] = manager
+                range_options = {}
+                try:
+                    range_options["current_range"] = tuple(
+                        manager.supported_current_ranges()
+                    )
+                except Exception:
+                    pass
+                try:
+                    range_options["applied_current_range"] = tuple(
+                        manager.supported_applied_current_ranges()
+                    )
+                except Exception:
+                    pass
+                self._current_range_options[id(instrument)] = range_options
                 manager.register_status_callback(
                     self._status_callback_for(instrument)
                 )
@@ -138,6 +158,7 @@ class palmsens_connection_service(QObject):
             except Exception:
                 pass
         self._managers.clear()
+        self._current_range_options.clear()
 
     def _status_callback_for(self, instrument):
         def handle_status(status):

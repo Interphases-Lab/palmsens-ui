@@ -54,7 +54,13 @@ from src.measurement_data import (
     LiveMeasurementStarted,
     LogicalMeasurementRun,
 )
-from src.method_config import METHOD_ORDER, METHOD_SPECS, build_method
+from src.method_config import (
+    CURRENT_RANGE_FIELD_KEYS,
+    CURRENT_RANGE_OPTIONS,
+    METHOD_ORDER,
+    METHOD_SPECS,
+    build_method,
+)
 from src.palmsens_service import palmsens_connection_service
 from src.temperature_chamber.temperature_controller import TemperatureProgress, TemperatureSettings
 from src.widgets import NoScrollComboBox
@@ -367,7 +373,13 @@ class bdf_export_dialog(QDialog):
 
 
 class method_configuration_dialog(QDialog):
-    def __init__(self, title: str, instrument=None, parent=None):
+    def __init__(
+        self,
+        title: str,
+        instrument=None,
+        current_range_options: dict[str, tuple[str, ...]] | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.setObjectName("methodConfigDialog")
         self.setWindowTitle(f"Run Measurement - {title}")
@@ -379,9 +391,10 @@ class method_configuration_dialog(QDialog):
         self.temperature_settings = None
         self.bdf_auto_save_settings = None
         self.instrument = instrument
+        self.current_range_options = current_range_options or {}
         self.imported_package = None
         self.imported_package_path: Path | None = None
-        self.field_widgets: dict[str, QLineEdit] = {}
+        self.field_widgets: dict[str, QWidget] = {}
         self.additional_measurement_checks: dict[str, QCheckBox] = {}
 
         dialog_layout = QVBoxLayout(self)
@@ -440,25 +453,61 @@ class method_configuration_dialog(QDialog):
         self.package_run_form.setVerticalSpacing(8)
         package_layout.addLayout(self.package_run_form)
 
+        def add_package_run_field(label_text: str, widget: QWidget, tooltip: str):
+            label = QLabel(label_text, self.package_widget)
+            label.setToolTip(tooltip)
+            widget.setToolTip(tooltip)
+            self.package_run_form.addRow(label, widget)
+
         self.aurora_sample_name_edit = QLineEdit("", self.package_widget)
-        self.package_run_form.addRow("Sample name", self.aurora_sample_name_edit)
+        add_package_run_field(
+            "Sample name",
+            self.aurora_sample_name_edit,
+            "Overrides the sample name stored in the imported package. "
+            "Leave blank to use the package value.",
+        )
 
         self.aurora_capacity_edit = QLineEdit("", self.package_widget)
-        self.package_run_form.addRow("Capacity (mAh)", self.aurora_capacity_edit)
+        add_package_run_field(
+            "Capacity (mAh)",
+            self.aurora_capacity_edit,
+            "Sample capacity in mAh. It is used to convert C-rate steps and limits "
+            "to current. Mandatory if using steps that depend on C-rate",
+        )
 
         self.aurora_device_combo = NoScrollComboBox(self.package_widget)
         for label, value in AURORA_DEVICE_OPTIONS:
             self.aurora_device_combo.addItem(label, value)
-        self.package_run_form.addRow("PalmSens target", self.aurora_device_combo)
+        add_package_run_field(
+            "PalmSens target",
+            self.aurora_device_combo,
+            "PalmSens instrument model used to validate the imported package and "
+            "generate compatible MethodSCRIPT.",
+        )
 
         self.aurora_scan_step_edit = QLineEdit("", self.package_widget)
-        self.package_run_form.addRow("Scan step voltage (V)", self.aurora_scan_step_edit)
+        add_package_run_field(
+            "Scan step voltage (V)",
+            self.aurora_scan_step_edit,
+            "Voltage interval that controls the rate at which voltage is sampled "
+            "during a voltage sweep. Either set this value or define the voltage "
+            "recording delta (record.voltage_V) in the imported package if using a"
+            "voltage-scan step",
+        )
 
         self.aurora_eis_dc_potential_edit = QLineEdit("0.0", self.package_widget)
-        self.package_run_form.addRow("EIS DC potential (V)", self.aurora_eis_dc_potential_edit)
+        add_package_run_field(
+            "EIS DC potential (V)",
+            self.aurora_eis_dc_potential_edit,
+            "DC potential offset, in volts, applied during potentiostatic EIS steps.",
+        )
 
         self.aurora_eis_dc_current_edit = QLineEdit("0.0", self.package_widget)
-        self.package_run_form.addRow("EIS DC current (mA)", self.aurora_eis_dc_current_edit)
+        add_package_run_field(
+            "EIS DC current (mA)",
+            self.aurora_eis_dc_current_edit,
+            "DC current offset, in mA, applied during galvanostatic EIS steps.",
+        )
 
         extra_measurements_label = QLabel("Extra measurements", self.package_widget)
         extra_measurements_label.setObjectName("auroraCardTitle")
@@ -537,6 +586,10 @@ class method_configuration_dialog(QDialog):
         package_layout.addWidget(temperature_title)
 
         self.temperature_enabled_checkbox = QCheckBox("Enable Arduino temperature chamber", self.package_widget)
+        self.temperature_enabled_checkbox.setToolTip(
+            "Connect to the automatically detected Arduino temperature chamber and "
+            "execute temperature steps from the imported package."
+        )
         package_layout.addWidget(self.temperature_enabled_checkbox)
 
         self.temperature_form = QFormLayout()
@@ -545,15 +598,38 @@ class method_configuration_dialog(QDialog):
         self.temperature_form.setVerticalSpacing(8)
         package_layout.addLayout(self.temperature_form)
 
+        def add_temperature_field(label_text: str, widget: QWidget, tooltip: str):
+            label = QLabel(label_text, self.package_widget)
+            label.setToolTip(tooltip)
+            widget.setToolTip(tooltip)
+            self.temperature_form.addRow(label, widget)
+
         self.temperature_tolerance_edit = QLineEdit("0.5", self.package_widget)
-        self.temperature_form.addRow("Tolerance (degC)", self.temperature_tolerance_edit)
+        add_temperature_field(
+            "Tolerance (degC)",
+            self.temperature_tolerance_edit,
+            "Maximum allowed difference between the measured chamber temperature "
+            "and the target, in degrees Celsius. For temperature steps that wait "
+            "for stability, the hold timer resets whenever the temperature moves "
+            "outside this tolerance. This setting has no effect when the package "
+            "step is configured to start its timer immediately at step start.",
+        )
 
         default_log_dir = Path(__file__).parent.parent / "out2" / "temp_logs"
         self.temperature_log_dir_edit = QLineEdit(str(default_log_dir), self.package_widget)
-        self.temperature_form.addRow("Log directory", self.temperature_log_dir_edit)
+        add_temperature_field(
+            "Log directory",
+            self.temperature_log_dir_edit,
+            "Folder for timestamped temperature-chamber status and command logs. "
+            "The folder is created automatically; leave blank to disable logging.",
+        )
 
         self.temperature_stop_on_abort_checkbox = QCheckBox("Stop chamber on abort", self.package_widget)
         self.temperature_stop_on_abort_checkbox.setChecked(True)
+        self.temperature_stop_on_abort_checkbox.setToolTip(
+            "Send a stop command to the temperature chamber when the measurement is "
+            "aborted. If unchecked, the chamber connection closes without stopping it."
+        )
         package_layout.addWidget(self.temperature_stop_on_abort_checkbox)
 
         layout.addWidget(self.package_widget)
@@ -613,10 +689,13 @@ class method_configuration_dialog(QDialog):
         return self.run_mode_combo.currentData()
 
     def raw_params(self) -> dict[str, str]:
-        return {
-            field_key: widget.text().strip()
-            for field_key, widget in self.field_widgets.items()
-        }
+        params = {}
+        for field_key, widget in self.field_widgets.items():
+            if isinstance(widget, QLineEdit):
+                params[field_key] = widget.text().strip()
+            elif isinstance(widget, NoScrollComboBox):
+                params[field_key] = str(widget.currentData())
+        return params
 
     def run_channel(self) -> int:
         # run channel will always be 0 as each channel is its own single channel device
@@ -731,6 +810,25 @@ class method_configuration_dialog(QDialog):
         self.field_widgets.clear()
         spec = METHOD_SPECS[self.selected_method_key()]
         for field in spec.fields:
+            if field.key in CURRENT_RANGE_FIELD_KEYS:
+                options = self.current_range_options.get(field.key) or CURRENT_RANGE_OPTIONS
+                widget = NoScrollComboBox(self)
+                for option in options:
+                    widget.addItem(option, option)
+                default_index = widget.findData(field.default)
+                if default_index >= 0:
+                    widget.setCurrentIndex(default_index)
+                tooltip = (
+                    "Select a current range supported by the connected PalmSens instrument. "
+                    "The applied or measured current values are expressed relative to this range."
+                )
+                label = QLabel(field.label, self)
+                label.setToolTip(tooltip)
+                widget.setToolTip(tooltip)
+                self.field_widgets[field.key] = widget
+                self.field_form.addRow(label, widget)
+                continue
+
             widget = QLineEdit(field.default, self)
             self.field_widgets[field.key] = widget
             self.field_form.addRow(field.label, widget)
@@ -1440,7 +1538,12 @@ class main_window(QMainWindow):
         if panel in self.active_runs:
             return
 
-        dialog = method_configuration_dialog(panel.base_title, instrument=panel.instrument, parent=self)
+        dialog = method_configuration_dialog(
+            panel.base_title,
+            instrument=panel.instrument,
+            current_range_options=self.connection_service.current_range_options(panel.instrument),
+            parent=self,
+        )
         if not dialog.exec():
             return
 
