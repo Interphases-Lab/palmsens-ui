@@ -69,6 +69,35 @@ import src.device_helpers as pslib
 PANEL_COLUMNS = 3
 
 
+def _sanitize_filename_component(value: str) -> str:
+    cleaned = "".join(character if character.isalnum() else "_" for character in value.strip())
+    return cleaned.strip("_")
+
+
+def _default_bdf_export_stem(cell_name: str, cas_id: str, sequence_number: int) -> str:
+    sanitized_cell_name = _sanitize_filename_component(cell_name)
+    sanitized_cas_id = _sanitize_filename_component(cas_id)
+    export_date = date.today().strftime("%Y%m%d")
+    if sanitized_cas_id:
+        return f"UU_{sanitized_cell_name}_{sanitized_cas_id}_{export_date}_{sequence_number:04d}"
+    return f"UU_{sanitized_cell_name}_{export_date}_{sequence_number:04d}"
+
+
+def _custom_bdf_export_stem(
+    base_name: str,
+    measurement_number: int | str,
+    step_type: str | None,
+    include_step_type: bool,
+) -> str:
+    parts = [
+        _sanitize_filename_component(base_name) or "measurement",
+        _sanitize_filename_component(str(measurement_number)) or "x",
+    ]
+    if include_step_type:
+        parts.append(_sanitize_filename_component(step_type or "step") or "step")
+    return "_".join(parts)
+
+
 @dataclass(frozen=True)
 class BdfAutoSaveSettings:
     output_dir: Path
@@ -76,8 +105,9 @@ class BdfAutoSaveSettings:
     cell_name: str
     cas_id: str
     optional_quantity_keys: set[str]
-    use_step_based_filenames: bool = False
-    filename_prefix: str = ""
+    custom_naming_enabled: bool = False
+    custom_base_name: str = ""
+    include_step_type: bool = False
 
 
 class connection_indicator(QLabel):
@@ -157,9 +187,6 @@ class bdf_export_dialog(QDialog):
         self.cas_id_edit = QLineEdit(self)
         self.cas_id_edit.setPlaceholderText("e.g. nisu1374")
 
-        self.export_separate_checkbox = QCheckBox("Export each measurement separately", self)
-        self.export_separate_checkbox.setChecked(False)
-
         output_options = QWidget(self)
         output_options_layout = QGridLayout(output_options)
         output_options_layout.setContentsMargins(0, 0, 0, 0)
@@ -195,7 +222,6 @@ class bdf_export_dialog(QDialog):
         folder_options_layout.addWidget(QLabel("Folder", folder_options), 0, 0)
         folder_options_layout.addWidget(self.output_dir_edit, 0, 1)
         folder_options_layout.addWidget(browse_button, 0, 2)
-        folder_options_layout.addWidget(self.export_separate_checkbox, 1, 1, 1, 2)
         folder_options_layout.setColumnStretch(1, 1)
         layout.addWidget(folder_options)
 
@@ -301,9 +327,6 @@ class bdf_export_dialog(QDialog):
 
     def selected_type(self):
         return self.file_type_combo_box.currentData()
-
-    def export_separate_measurements(self):
-        return self.export_separate_checkbox.isChecked()
 
     def cell_name(self):
         return self.cell_name_edit.text().strip() or "A0001"
@@ -568,16 +591,66 @@ class method_configuration_dialog(QDialog):
         aurora_auto_bdf_layout.addWidget(QLabel("CAS ID", self.aurora_auto_bdf_widget), 3, 0)
         aurora_auto_bdf_layout.addWidget(self.aurora_auto_bdf_cas_id_edit, 3, 1, 1, 2)
 
-        self.aurora_auto_bdf_step_naming_checkbox = QCheckBox(
-            "Use step type in file names",
-            self.aurora_auto_bdf_widget,
-        )
-        aurora_auto_bdf_layout.addWidget(self.aurora_auto_bdf_step_naming_checkbox, 4, 0, 1, 3)
+        self.aurora_custom_naming_widget = QFrame(self.aurora_auto_bdf_widget)
+        self.aurora_custom_naming_widget.setObjectName("customNamingCard")
+        custom_naming_layout = QVBoxLayout(self.aurora_custom_naming_widget)
+        custom_naming_layout.setContentsMargins(10, 8, 10, 8)
+        custom_naming_layout.setSpacing(7)
 
-        self.aurora_auto_bdf_filename_prefix_edit = QLineEdit("", self.aurora_auto_bdf_widget)
-        self.aurora_auto_bdf_filename_prefix_edit.setPlaceholderText("e.g. experiment_1")
-        aurora_auto_bdf_layout.addWidget(QLabel("Base name", self.aurora_auto_bdf_widget), 5, 0)
-        aurora_auto_bdf_layout.addWidget(self.aurora_auto_bdf_filename_prefix_edit, 5, 1, 1, 2)
+        custom_naming_title = QLabel("Custom naming", self.aurora_custom_naming_widget)
+        custom_naming_title.setObjectName("auroraCardTitle")
+        custom_naming_layout.addWidget(custom_naming_title)
+
+        self.aurora_custom_naming_checkbox = QCheckBox(
+            "Enable custom naming",
+            self.aurora_custom_naming_widget,
+        )
+        self.aurora_custom_naming_checkbox.setToolTip(
+            "Replace the standard cell, CAS ID, date, and sequence-based file name "
+            "with a custom base name."
+        )
+        custom_naming_layout.addWidget(self.aurora_custom_naming_checkbox)
+
+        custom_naming_form = QFormLayout()
+        custom_naming_form.setContentsMargins(0, 0, 0, 0)
+        custom_naming_form.setHorizontalSpacing(8)
+        custom_naming_form.setVerticalSpacing(7)
+
+        self.aurora_custom_base_name_edit = QLineEdit("", self.aurora_custom_naming_widget)
+        self.aurora_custom_base_name_edit.setPlaceholderText("e.g. experiment_1")
+        base_name_label = QLabel("Base name", self.aurora_custom_naming_widget)
+        base_name_tooltip = (
+            "Text placed at the beginning of every custom BDF file name. "
+            "Unsupported filename characters are replaced with underscores."
+        )
+        base_name_label.setToolTip(base_name_tooltip)
+        self.aurora_custom_base_name_edit.setToolTip(base_name_tooltip)
+        custom_naming_form.addRow(base_name_label, self.aurora_custom_base_name_edit)
+
+        self.aurora_custom_step_type_checkbox = QCheckBox(
+            "Include step type",
+            self.aurora_custom_naming_widget,
+        )
+        self.aurora_custom_step_type_checkbox.setToolTip(
+            "Append the package step type, such as constant_current or temperature, "
+            "after the measurement number."
+        )
+        custom_naming_form.addRow("", self.aurora_custom_step_type_checkbox)
+        custom_naming_layout.addLayout(custom_naming_form)
+
+        self.aurora_filename_preview_label = QLabel(self.aurora_custom_naming_widget)
+        self.aurora_filename_preview_label.setObjectName("filenamePreview")
+        self.aurora_filename_preview_label.setWordWrap(True)
+        self.aurora_filename_preview_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.aurora_filename_preview_label.setToolTip(
+            "Example file name. At run time, x is replaced by the measurement number "
+            "and step_type by the actual package step type."
+        )
+        custom_naming_layout.addWidget(self.aurora_filename_preview_label)
+
+        aurora_auto_bdf_layout.addWidget(self.aurora_custom_naming_widget, 4, 0, 1, 3)
         aurora_auto_bdf_layout.setColumnStretch(1, 1)
         package_layout.addWidget(self.aurora_auto_bdf_widget)
 
@@ -675,7 +748,14 @@ class method_configuration_dialog(QDialog):
         self.aurora_device_combo.currentIndexChanged.connect(self.update_additional_measurements)
         self.temperature_enabled_checkbox.toggled.connect(self.update_temperature_fields)
         self.aurora_auto_bdf_checkbox.toggled.connect(self.update_auto_bdf_fields)
-        self.aurora_auto_bdf_step_naming_checkbox.toggled.connect(self.update_auto_bdf_fields)
+        self.aurora_custom_naming_checkbox.toggled.connect(self.update_auto_bdf_fields)
+        self.aurora_custom_step_type_checkbox.toggled.connect(self.update_bdf_filename_preview)
+        self.aurora_custom_base_name_edit.textChanged.connect(self.update_bdf_filename_preview)
+        self.aurora_auto_bdf_cell_name_edit.textChanged.connect(self.update_bdf_filename_preview)
+        self.aurora_auto_bdf_cas_id_edit.textChanged.connect(self.update_bdf_filename_preview)
+        self.aurora_auto_bdf_type_combo.currentIndexChanged.connect(
+            self.update_bdf_filename_preview
+        )
         self.update_additional_measurements()
         self.update_temperature_fields()
         self.update_auto_bdf_fields()
@@ -736,10 +816,32 @@ class method_configuration_dialog(QDialog):
     def update_auto_bdf_fields(self):
         enabled = self.aurora_auto_bdf_checkbox.isChecked()
         self.aurora_auto_bdf_widget.setVisible(enabled)
-        use_step_names = self.aurora_auto_bdf_step_naming_checkbox.isChecked()
-        self.aurora_auto_bdf_filename_prefix_edit.setEnabled(use_step_names)
-        self.aurora_auto_bdf_cell_name_edit.setEnabled(not use_step_names)
-        self.aurora_auto_bdf_cas_id_edit.setEnabled(not use_step_names)
+        custom_naming = self.aurora_custom_naming_checkbox.isChecked()
+        self.aurora_custom_base_name_edit.setEnabled(custom_naming)
+        self.aurora_custom_step_type_checkbox.setEnabled(custom_naming)
+        self.aurora_auto_bdf_cell_name_edit.setEnabled(not custom_naming)
+        self.aurora_auto_bdf_cas_id_edit.setEnabled(not custom_naming)
+        self.update_bdf_filename_preview()
+
+    def update_bdf_filename_preview(self):
+        export_type = self.aurora_auto_bdf_type_combo.currentData() or "csv"
+        if self.aurora_custom_naming_checkbox.isChecked():
+            base_name = self.aurora_custom_base_name_edit.text().strip() or "base_name"
+            filename_stem = _custom_bdf_export_stem(
+                base_name,
+                "x",
+                "step_type",
+                self.aurora_custom_step_type_checkbox.isChecked(),
+            )
+        else:
+            filename_stem = _default_bdf_export_stem(
+                self.aurora_auto_bdf_cell_name_edit.text().strip() or "A0001",
+                self.aurora_auto_bdf_cas_id_edit.text().strip(),
+                1,
+            )
+        self.aurora_filename_preview_label.setText(
+            f"Preview: {filename_stem}.bdf.{export_type}"
+        )
 
     def build_bdf_auto_save_settings(self) -> BdfAutoSaveSettings | None:
         if not self.aurora_auto_bdf_checkbox.isChecked():
@@ -749,9 +851,9 @@ class method_configuration_dialog(QDialog):
         if not raw_output_dir:
             raise ValueError("BDF auto-save folder is required.")
 
-        use_step_names = self.aurora_auto_bdf_step_naming_checkbox.isChecked()
-        filename_prefix = self.aurora_auto_bdf_filename_prefix_edit.text().strip()
-        if use_step_names and not self._is_valid_filename_prefix(filename_prefix):
+        custom_naming = self.aurora_custom_naming_checkbox.isChecked()
+        custom_base_name = self.aurora_custom_base_name_edit.text().strip()
+        if custom_naming and not self._is_valid_filename_base(custom_base_name):
             raise ValueError("A base name containing at least one letter or number is required.")
 
         return BdfAutoSaveSettings(
@@ -760,12 +862,13 @@ class method_configuration_dialog(QDialog):
             cell_name=self.aurora_auto_bdf_cell_name_edit.text().strip() or "A0001",
             cas_id=self.aurora_auto_bdf_cas_id_edit.text().strip(),
             optional_quantity_keys={quantity_key for quantity_key, _ in bdf_optional_quantity_choices()},
-            use_step_based_filenames=use_step_names,
-            filename_prefix=filename_prefix,
+            custom_naming_enabled=custom_naming,
+            custom_base_name=custom_base_name,
+            include_step_type=self.aurora_custom_step_type_checkbox.isChecked(),
         )
 
     @staticmethod
-    def _is_valid_filename_prefix(value: str) -> bool:
+    def _is_valid_filename_base(value: str) -> bool:
         return any(character.isalnum() for character in value)
 
     def build_temperature_settings(self) -> TemperatureSettings | None:
@@ -1387,8 +1490,7 @@ class main_window(QMainWindow):
                         output_dir,
                         filename_stem,
                         out_type,
-                        dialog.export_separate_measurements(),
-                        dialog.selected_optional_quantity_keys(),
+                        optional_quantity_keys=dialog.selected_optional_quantity_keys(),
                     )
                 )
         except BdfExportError as exc:
@@ -1632,11 +1734,12 @@ class main_window(QMainWindow):
             return
 
         try:
-            if settings.use_step_based_filenames:
-                filename_stem = self._step_bdf_export_stem(
-                    settings.filename_prefix,
-                    segment.step_type,
+            if settings.custom_naming_enabled:
+                filename_stem = _custom_bdf_export_stem(
+                    settings.custom_base_name,
                     segment.index,
+                    segment.step_type,
+                    settings.include_step_type,
                 )
             else:
                 used_sequence_numbers = self.run_bdf_auto_save_sequences.setdefault(run_id, set())
@@ -1656,8 +1759,7 @@ class main_window(QMainWindow):
                 settings.output_dir,
                 filename_stem,
                 settings.export_type,
-                False,
-                settings.optional_quantity_keys,
+                optional_quantity_keys=settings.optional_quantity_keys,
             )
         except BdfExportError as exc:
             self._report_bdf_auto_save_failure(run_id, panel, str(exc))
@@ -1759,29 +1861,11 @@ class main_window(QMainWindow):
 
     @staticmethod
     def _sanitize_export_name(name: str) -> str:
-        cleaned = "".join(character if character.isalnum() else "_" for character in name.strip())
-        cleaned = cleaned.strip("_")
-        return cleaned
+        return _sanitize_filename_component(name)
 
-    @classmethod
-    def _bdf_export_stem(cls, cell_name: str, cas_id: str, sequence_number: int) -> str:
-        sanitized_cell_name = cls._sanitize_export_name(cell_name)
-        sanitized_cas_id = cls._sanitize_export_name(cas_id)
-        export_date = date.today().strftime("%Y%m%d")
-        if sanitized_cas_id:
-            return f"UU_{sanitized_cell_name}_{sanitized_cas_id}_{export_date}_{sequence_number:04d}"
-        return f"UU_{sanitized_cell_name}_{export_date}_{sequence_number:04d}"
-
-    @classmethod
-    def _step_bdf_export_stem(
-        cls,
-        filename_prefix: str,
-        step_type: str | None,
-        measurement_number: int,
-    ) -> str:
-        sanitized_prefix = cls._sanitize_export_name(filename_prefix) or "measurement"
-        sanitized_step_type = cls._sanitize_export_name(step_type or "step") or "step"
-        return f"{sanitized_prefix}_{measurement_number}_{sanitized_step_type}"
+    @staticmethod
+    def _bdf_export_stem(cell_name: str, cas_id: str, sequence_number: int) -> str:
+        return _default_bdf_export_stem(cell_name, cas_id, sequence_number)
 
     @classmethod
     def _next_bdf_sequence_number(

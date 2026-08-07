@@ -260,7 +260,15 @@ def _logical_measurement_dataset_views(
             if _has_arrays(individual_dataset):
                 views.append(DatasetView(view_id, title, individual_dataset, source, is_eis=True))
 
-    eis_dataset = _unify_segment_datasets(f"{measurement.title} EIS", eis_sources) if include_unified_eis else None
+    eis_dataset = (
+        _unify_segment_datasets(
+            f"{measurement.title} EIS",
+            eis_sources,
+            separate_sources=True,
+        )
+        if include_unified_eis
+        else None
+    )
     if include_unified_eis and _has_arrays(eis_dataset):
         views.append(DatasetView("eis", f"{measurement.title} EIS", eis_dataset, measurement, is_eis=True))
 
@@ -277,6 +285,8 @@ def _segment_eis_title(segment: MeasurementSegment, eis_index: int) -> str:
 def _unify_segment_datasets(
     title: str,
     sources: list[tuple[MeasurementSegment, Any]],
+    *,
+    separate_sources: bool = False,
 ) -> UnifiedDataset | None:
     values_by_key: OrderedDict[tuple[str, str, str, str], list[Any]] = OrderedDict()
     metadata_by_key: dict[tuple[str, str, str, str], dict[str, str]] = {}
@@ -294,6 +304,15 @@ def _unify_segment_datasets(
         row_count = _dataset_row_count(arrays)
         if row_count <= 0:
             continue
+
+        if separate_sources and total_length:
+            for values in values_by_key.values():
+                values.append(math.nan)
+            segment_indexes.append(math.nan)
+            step_ids.append(math.nan)
+            execution_indexes.append(math.nan)
+            step_types.append("")
+            total_length += 1
 
         source_values: dict[tuple[str, str, str, str], list[Any]] = {}
         source_priorities: dict[tuple[str, str, str, str], int] = {}

@@ -60,6 +60,14 @@ class graph_widget(QWidget):
     HOVER_LABEL_OFFSET = 12
     HOVER_LABEL_MARGIN = 4
     HOVER_MARKER_SIZE = 10
+    EIS_SERIES_COLORS = (
+        "#2f6f9f",
+        "#7c3aed",
+        "#d97706",
+        "#059669",
+        "#dc2626",
+        "#0891b2",
+    )
 
     def __init__(self):
         super().__init__()
@@ -75,6 +83,7 @@ class graph_widget(QWidget):
         self.live_active_segment: MeasurementSegment | None = None
         self.live_current_view: DatasetView | None = None
         self.live_curve = None
+        self.primary_curves = []
         self.right_view = None
         self.right_curve = None
         self.snap_hover_to_data = False
@@ -89,6 +98,12 @@ class graph_widget(QWidget):
         self.plot_widget.getAxis("bottom").setTextPen("#56616f")
         self.plot_widget.getAxis("left").setTextPen("#56616f")
         self.plot_item = self.plot_widget.getPlotItem()
+        self.legend = self.plot_item.addLegend(
+            offset=(-10, 10),
+            brush=pg.mkBrush(255, 255, 255, 225),
+            pen=pg.mkPen("#c7d0da"),
+        )
+        self.legend.hide()
         self.set_rectangle_zoom_enabled(False)
         self._setup_right_axis()
         self._setup_hover_coordinates()
@@ -118,7 +133,7 @@ class graph_widget(QWidget):
 
     def _update_hover_coordinates(self, scene_position):
         plot_bounds = self.plot_item.vb.sceneBoundingRect()
-        if self.live_curve is None or not plot_bounds.contains(scene_position):
+        if not self.primary_curves or not plot_bounds.contains(scene_position):
             self._hide_hover_coordinates()
             return
 
@@ -157,32 +172,44 @@ class graph_widget(QWidget):
         self.hover_label.show()
 
     def _nearest_visible_data_point(self, cursor_x, cursor_y):
-        x_data, y_data = self.live_curve.getData()
-        if x_data is None or y_data is None:
-            return None
-
-        x_data = np.asarray(x_data)
-        y_data = np.asarray(y_data)
         x_range, y_range = self.plot_item.vb.viewRange()
-        visible = (
-            np.isfinite(x_data)
-            & np.isfinite(y_data)
-            & (x_data >= min(x_range))
-            & (x_data <= max(x_range))
-            & (y_data >= min(y_range))
-            & (y_data <= max(y_range))
-        )
-        if not visible.any():
-            return None
-
-        visible_indexes = np.flatnonzero(visible)
         x_span = abs(x_range[1] - x_range[0]) or 1
         y_span = abs(y_range[1] - y_range[0]) or 1
         plot_bounds = self.plot_item.vb.sceneBoundingRect()
-        x_distance = (x_data[visible] - cursor_x) * plot_bounds.width() / x_span
-        y_distance = (y_data[visible] - cursor_y) * plot_bounds.height() / y_span
-        nearest_index = visible_indexes[np.argmin(x_distance ** 2 + y_distance ** 2)]
-        return float(x_data[nearest_index]), float(y_data[nearest_index])
+        nearest = None
+
+        for curve in self.primary_curves:
+            x_data, y_data = curve.getData()
+            if x_data is None or y_data is None:
+                continue
+
+            x_data = np.asarray(x_data)
+            y_data = np.asarray(y_data)
+            visible = (
+                np.isfinite(x_data)
+                & np.isfinite(y_data)
+                & (x_data >= min(x_range))
+                & (x_data <= max(x_range))
+                & (y_data >= min(y_range))
+                & (y_data <= max(y_range))
+            )
+            if not visible.any():
+                continue
+
+            visible_indexes = np.flatnonzero(visible)
+            x_distance = (x_data[visible] - cursor_x) * plot_bounds.width() / x_span
+            y_distance = (y_data[visible] - cursor_y) * plot_bounds.height() / y_span
+            distances = x_distance ** 2 + y_distance ** 2
+            local_index = int(np.argmin(distances))
+            candidate = (
+                float(distances[local_index]),
+                float(x_data[visible_indexes[local_index]]),
+                float(y_data[visible_indexes[local_index]]),
+            )
+            if nearest is None or candidate[0] < nearest[0]:
+                nearest = candidate
+
+        return None if nearest is None else nearest[1:]
 
     def set_snap_hover_to_data(self, enabled):
         self.snap_hover_to_data = enabled
@@ -240,9 +267,7 @@ class graph_widget(QWidget):
         arrays = dataset_arrays(dataset_view.dataset) if dataset_view is not None else []
 
         if not arrays:
-            self.plot_widget.clear()
-            self.live_curve = None
-            self._hide_hover_coordinates()
+            self._prepare_plot()
             return
 
         if dataset_view is not None:
@@ -264,11 +289,80 @@ class graph_widget(QWidget):
 
         x_array = arrays[self.x_index]
         y_array = arrays[self.y_index]
+        if dataset_view is not None and dataset_view.id == "eis":
+            series = self._split_eis_series(arrays, self.x_index, self.y_index)
+            if len(series) > 1:
+                self._plot_labeled_series(
+                    series,
+                    f"{x_array.name}, {x_array.unit}",
+                    f"{y_array.name}, {y_array.unit}",
+                )
+                return
         self._plot_arrays(x_array.to_numpy(),
                           y_array.to_numpy(),
                           f"{x_array.name}, {x_array.unit}",
                           f"{y_array.name}, {y_array.unit}"
                           )
+
+    @staticmethod
+    def _split_eis_series(arrays, x_index, y_index):
+        x_values = np.asarray(arrays[x_index].to_numpy()).ravel()
+        y_values = np.asarray(arrays[y_index].to_numpy()).ravel()
+        if x_values.shape != y_values.shape:
+            return []
+
+        finite = np.isfinite(x_values) & np.isfinite(y_values)
+        starts = np.flatnonzero(finite & np.concatenate(([True], ~finite[:-1])))
+        ends = np.flatnonzero(finite & np.concatenate((~finite[1:], [True]))) + 1
+        metadata = {
+            str(_get_name(array, "")): np.asarray(array.to_numpy()).ravel()
+            for array in arrays
+            if _is_metadata_array_name(_get_name(array, ""))
+        }
+
+        series = []
+        for series_number, (start, end) in enumerate(zip(starts, ends), start=1):
+            label = graph_widget._eis_series_label(
+                metadata,
+                int(start),
+                int(end),
+                series_number,
+            )
+            series.append((x_values[start:end], y_values[start:end], label))
+        return series
+
+    @staticmethod
+    def _eis_series_label(metadata, start, end, series_number):
+        step_ids = metadata.get("step_id", ())[start:end]
+        step_types = metadata.get("step_type", ())[start:end]
+        step_id = next((value for value in step_ids if graph_widget._has_value(value)), None)
+        step_type = next(
+            (str(value) for value in step_types if graph_widget._has_value(value)),
+            "",
+        )
+
+        details = []
+        if step_id is not None:
+            numeric_step_id = float(step_id)
+            step_label = (
+                str(int(numeric_step_id))
+                if numeric_step_id.is_integer()
+                else f"{numeric_step_id:g}"
+            )
+            details.append(f"Step {step_label}")
+        if step_type:
+            details.append(step_type.replace("_", " "))
+        suffix = f" — {' · '.join(details)}" if details else ""
+        return f"Spectrum {series_number}{suffix}"
+
+    @staticmethod
+    def _has_value(value):
+        if value is None or str(value) == "":
+            return False
+        try:
+            return bool(np.isfinite(value))
+        except TypeError:
+            return True
 
     def _dataset_view_for_selection(self, measurement, selection=None):
         return self._dataset_view_from_views(measurement_dataset_views(measurement), selection)
@@ -390,14 +484,47 @@ class graph_widget(QWidget):
         y_array = np.asarray(y_array).ravel()
         if x_array.shape != y_array.shape:
             return
-        self._hide_hover_coordinates()
-        self.plot_widget.clear()
-        self._clear_right_axis()
+        self._prepare_plot()
         self.plot_widget.setLabel("bottom", f"{x_label}")
         self.plot_widget.setLabel("left", f"{y_label}")
         pen = pg.mkPen(color="#2f6f9f", width=2)
-        self.live_curve = self.plot_widget.plot(x_array, y_array, pen=pen)
+        self.live_curve = self.plot_widget.plot(
+            x_array,
+            y_array,
+            pen=pen,
+            connect="finite",
+        )
+        self.primary_curves = [self.live_curve]
         self._add_hover_marker()
+
+    def _plot_labeled_series(self, series, x_label, y_label):
+        self._prepare_plot()
+        self.plot_widget.setLabel("bottom", f"{x_label}")
+        self.plot_widget.setLabel("left", f"{y_label}")
+
+        for index, (x_values, y_values, label) in enumerate(series):
+            color = self.EIS_SERIES_COLORS[index % len(self.EIS_SERIES_COLORS)]
+            curve = self.plot_item.plot(
+                x_values,
+                y_values,
+                pen=pg.mkPen(color=color, width=2),
+                connect="finite",
+                name=label,
+            )
+            self.primary_curves.append(curve)
+
+        self.live_curve = self.primary_curves[0] if self.primary_curves else None
+        self.legend.show()
+        self._add_hover_marker()
+
+    def _prepare_plot(self):
+        self._hide_hover_coordinates()
+        self.plot_widget.clear()
+        self._clear_right_axis()
+        self.legend.clear()
+        self.legend.hide()
+        self.live_curve = None
+        self.primary_curves = []
 
     def _plot_dual_arrays_from_indexes(self, arrays, x_index, left_y_index, right_y_index):
         if x_index >= len(arrays):
@@ -440,9 +567,7 @@ class graph_widget(QWidget):
             self._plot_arrays(left_x, left_y, x_label, left_label)
             return
 
-        self._hide_hover_coordinates()
-        self.plot_widget.clear()
-        self._clear_right_axis()
+        self._prepare_plot()
         self.plot_item.showAxis("right")
         self.plot_item.setLabel("bottom", f"{x_label}")
         self.plot_item.setLabel("left", f"{left_label}", color="#2f6f9f")
@@ -452,11 +577,14 @@ class graph_widget(QWidget):
             left_x,
             left_y,
             pen=pg.mkPen(color="#2f6f9f", width=2),
+            connect="finite",
         )
+        self.primary_curves = [self.live_curve]
         self.right_curve = pg.PlotDataItem(
             right_x,
             right_y,
             pen=pg.mkPen(color="#7c3aed", width=2),
+            connect="finite",
         )
         self.right_view.addItem(self.right_curve)
         self._update_right_axis()

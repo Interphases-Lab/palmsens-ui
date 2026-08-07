@@ -66,6 +66,12 @@ QFrame#auroraOptionsCard {
     border-radius: 12px;
 }
 
+QFrame#customNamingCard {
+    background: #f8fafc;
+    border: 1px solid #e1e7ee;
+    border-radius: 8px;
+}
+
 QLabel#graphPanelTitle {
     color: #1f2a36;
     font-size: 14px;
@@ -88,6 +94,11 @@ QLabel#auroraCardTitle {
 
 QLabel#auroraHelpText {
     color: #52606d;
+}
+
+QLabel#filenamePreview {
+    color: #52606d;
+    font-family: Consolas, monospace;
 }
 
 QCheckBox {

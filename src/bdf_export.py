@@ -276,21 +276,17 @@ def export_measurement_to_bdf_files(
     output_dir: Path,
     filename_stem: str,
     export_type: str,
-    export_separate: bool = False,
     optional_quantity_keys: set[str] | None = None,
 ) -> list[Path]:
     dataset_views = measurement_dataset_views(measurement, include_unified_eis=False)
     if not dataset_views:
         raise BdfExportError("Measurement does not contain any dataset arrays.")
 
-    written_paths = []
-    multiple_dataset_views = len(dataset_views) > 1
     dataframes = []
     export_errors = []
 
     for dataset_view in dataset_views:
         groups = _measurement_groups(dataset_view.dataset)
-        multiple_groups = len(groups) > 1
         for group in groups:
             try:
                 series = _extract_bdf_series(group, optional_quantity_keys)
@@ -305,27 +301,15 @@ def export_measurement_to_bdf_files(
             res = bdf.validate(dataframe, raise_on_error=True)
             if not res["ok"]:
                 raise BdfExportError("Invalid battery data format dataframe")
-            stem = filename_stem
-            if multiple_dataset_views:
-                stem = f"{stem}_{_sanitize_stem(dataset_view.id)}"
-            if multiple_groups:
-                stem = f"{stem}_group_{group['id']}"
-            if export_separate:
-                output_path = _unique_output_path(output_dir, stem, export_type)
-                _write_dataframe(output_path, dataframe, export_type)
-                written_paths.append(output_path)
-
     if not dataframes:
         if export_errors:
             raise BdfExportError(export_errors[0])
         raise BdfExportError("Measurement does not contain any exportable dataset groups.")
 
     combined_dataframes = _sort_bdf_dataframe(pd.concat(dataframes, ignore_index=True))
-    combined_stem = filename_stem
-    total_path = _unique_output_path(output_dir, combined_stem, export_type)
+    total_path = _unique_output_path(output_dir, filename_stem, export_type)
     _write_dataframe(total_path, combined_dataframes, export_type)
-    written_paths.append(total_path)
-    return written_paths
+    return [total_path]
 
 
 def bdf_optional_quantity_choices() -> list[tuple[str, str]]:
@@ -888,11 +872,6 @@ def _bdf_filename(stem: str, export_type: str) -> str:
 
 def _without_bdf_suffix(stem: str) -> str:
     return stem[:-4] if stem.casefold().endswith(".bdf") else stem
-
-
-def _sanitize_stem(value: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_")
-    return cleaned or "dataset"
 
 
 def _normalize_unit(unit) -> str:
