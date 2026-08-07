@@ -249,14 +249,15 @@ class measurement_runner(QObject):
             if stop_polling.is_set():
                 return
             if status is not None:
-                sample = TemperatureSample(
-                    elapsed_s=time.monotonic() - measurement_started_at,
-                    temperature_c=status.temperature_c,
-                    setpoint_c=status.setpoint_c,
+                samples.append(
+                    TemperatureSample(
+                        elapsed_s=time.monotonic() - measurement_started_at,
+                        temperature_c=status.temperature_c,
+                        setpoint_c=status.setpoint_c,
+                    )
                 )
-                samples.append(sample)
                 if status_callback is not None:
-                    status_callback(status, sample)
+                    status_callback(status)
                 if stop_when_status is not None and stop_when_status(status):
                     completion_event.set()
                     return
@@ -320,7 +321,7 @@ class measurement_runner(QObject):
         latest_status = None
         temperature_step_complete = False
 
-        def handle_status(status, sample):
+        def handle_status(status):
             nonlocal latest_status, wait_started_at, temperature_step_complete
             latest_status = status
             now = time.monotonic()
@@ -351,7 +352,6 @@ class measurement_runner(QObject):
                         wait_s,
                         action.wait_starts_immediately,
                     ),
-                    measurement_elapsed_s=sample.elapsed_s,
                 )
             )
 

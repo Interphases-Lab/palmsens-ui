@@ -41,19 +41,6 @@ def _get_unit(data_array, default = None):
 def _get_name(data_array, default = None):
     return getattr(data_array, "name", default)
 
-
-def _is_time_data_array(data_array):
-    identifiers = (
-        _get_name(data_array, ""),
-        getattr(data_array, "type", ""),
-        getattr(data_array, "quantity", ""),
-    )
-    return any(
-        str(value).strip().casefold() in {"time", "elapsed time"}
-        for value in identifiers
-    )
-
-
 class _LiveDataset:
     def __init__(self, title, arrays):
         self.title = title
@@ -73,7 +60,6 @@ class graph_widget(QWidget):
     HOVER_LABEL_OFFSET = 12
     HOVER_LABEL_MARGIN = 4
     HOVER_MARKER_SIZE = 10
-    TEMPERATURE_COLOR = "#d97706"
     EIS_SERIES_COLORS = (
         "#2f6f9f",
         "#7c3aed",
@@ -96,7 +82,6 @@ class graph_widget(QWidget):
         self.live_run: LogicalMeasurementRun | None = None
         self.live_active_segment: MeasurementSegment | None = None
         self.live_current_view: DatasetView | None = None
-        self.live_temperature_points: list[tuple[float, float]] = []
         self.live_curve = None
         self.primary_curves = []
         self.right_view = None
@@ -257,7 +242,6 @@ class graph_widget(QWidget):
             self.live_active_segment = event.segment
             self.live_arrays = {}
             self.live_current_view = None
-            self.live_temperature_points = []
             self._refresh_live_dataset_views()
 
         self.measurement = None
@@ -268,7 +252,6 @@ class graph_widget(QWidget):
 
         self.live_run.add_segment(segment)
         self.live_active_segment = None
-        self.live_temperature_points = []
         self._refresh_live_dataset_views()
         self._plot_selected_live_view()
 
@@ -279,7 +262,6 @@ class graph_widget(QWidget):
         self.live_run = None
         self.live_active_segment = None
         self.live_current_view = None
-        self.live_temperature_points = []
 
     def _plot_dataset_view(self, dataset_view, selection=None):
         arrays = dataset_arrays(dataset_view.dataset) if dataset_view is not None else []
@@ -321,7 +303,6 @@ class graph_widget(QWidget):
                           f"{x_array.name}, {x_array.unit}",
                           f"{y_array.name}, {y_array.unit}"
                           )
-        self._plot_live_temperature_overlay(dataset_view, x_array)
 
     @staticmethod
     def _split_eis_series(arrays, x_index, y_index):
@@ -415,54 +396,6 @@ class graph_widget(QWidget):
         self.live_current_view = dataset_view
         self._refresh_live_dataset_views()
         self._plot_selected_live_view()
-
-    def plot_live_temperature(self, progress):
-        segment = self.live_active_segment
-        if segment is None or segment.step_type != "temperature":
-            return
-        if progress.measurement_elapsed_s is None or progress.temperature_c is None:
-            return
-
-        self.live_temperature_points.append(
-            (float(progress.measurement_elapsed_s), float(progress.temperature_c))
-        )
-        if self.live_current_view is not None:
-            self._plot_selected_live_view()
-
-    def _plot_live_temperature_overlay(self, dataset_view, x_array):
-        segment = self.live_active_segment
-        if (
-            not self.live_temperature_points
-            or segment is None
-            or segment.step_type != "temperature"
-            or not _is_time_data_array(x_array)
-        ):
-            return
-
-        elapsed_offset_s = (
-            segment.elapsed_offset_s if dataset_view.id == "measurement" else 0.0
-        )
-        elapsed_s = [elapsed_offset_s + point[0] for point in self.live_temperature_points]
-        temperature_c = [point[1] for point in self.live_temperature_points]
-
-        self.plot_item.showAxis("right")
-        self.plot_item.setLabel(
-            "right",
-            "Chamber temperature, degC",
-            color=self.TEMPERATURE_COLOR,
-        )
-        self.right_curve = pg.PlotDataItem(
-            elapsed_s,
-            temperature_c,
-            pen=pg.mkPen(color=self.TEMPERATURE_COLOR, width=2),
-            connect="finite",
-            name="Chamber temperature",
-        )
-        self.right_view.addItem(self.right_curve)
-        self.legend.addItem(self.right_curve, "Chamber temperature")
-        self.legend.show()
-        self._update_right_axis()
-        self.right_view.autoRange()
 
     def _plot_selected_live_view(self):
         selection = self.live_axis_selection
