@@ -26,6 +26,8 @@ Temperature steps are non-Palsmens native steps and are handled directly by the 
 
 Leave the serial port blank to auto-detect Arduino USB serial devices, or enter a port such as `COM31`.
 
+While the chamber is enabled, it is polled during every PalmSens measurement step, including steps that do not change the temperature. Each exported row uses the latest chamber temperature and setpoint available at that time, and both values are included in BDF exports. The setpoint is stored in T1 and the current temperature is stored in the ambient temperature fields.
+
 ## Run
 
 Python 3.12 or newer is required. From the repository root, the shortest setup is with [uv](https://docs.astral.sh/uv/):

@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from PySide6.QtWidgets import (
     QWidget,
     QLabel,
@@ -9,32 +11,26 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QMessageBox,
     QFrame,
+    QMenu,
     QSizePolicy,
-    QCheckBox
+    QToolButton,
 )
 from PySide6.QtCore import Signal, Qt, QSize
 from PySide6.QtGui import QAction
 import pyqtgraph as pg
-import re
 import numpy as np
 
-from src.measurement_data import DatasetView, dataset_arrays, default_axis_indexes, measurement_arrays, measurement_dataset_views
+from src.measurement_data import (
+    DatasetView,
+    LiveMeasurementStarted,
+    LogicalMeasurementRun,
+    MeasurementSegment,
+    dataset_arrays,
+    default_axis_indexes,
+    measurement_arrays,
+    measurement_dataset_views,
+)
 from src.widgets import NoScrollComboBox
-
-def _canonical_measurement_name(name):
-    if name.startswith("Applied"):
-        base_name = name.removeprefix("Applied")
-        if base_name in {"Current", "Potential", "Voltage"}:
-            return base_name
-    return name
-
-def _axis_group_name(data_array):
-    name = _get_name(data_array, "")
-    stripped_name = re.sub(r"\d+_\d+$", "", str(name))
-    canonical_name = _canonical_measurement_name(stripped_name)
-    if _is_metadata_array_name(canonical_name):
-        return None
-    return canonical_name or None
 
 def _is_metadata_array_name(name):
     return str(name) in {"segment_index", "step_id", "execution_index", "step_type"}
@@ -53,6 +49,13 @@ class _LiveDataset:
     def arrays(self):
         return self._arrays
 
+
+class _LiveMeasurement:
+    def __init__(self, title, dataset):
+        self.title = title
+        self.dataset = dataset
+
+
 class graph_widget(QWidget):
     HOVER_LABEL_OFFSET = 12
     HOVER_LABEL_MARGIN = 4
@@ -66,7 +69,11 @@ class graph_widget(QWidget):
         self.y_index = None
         self.dataset_view_id = None
         self.live_dataset_views = []
+        self.live_arrays = {}
         self.live_axis_selection = None
+        self.live_run: LogicalMeasurementRun | None = None
+        self.live_active_segment: MeasurementSegment | None = None
+        self.live_current_view: DatasetView | None = None
         self.live_curve = None
         self.right_view = None
         self.right_curve = None
@@ -82,9 +89,14 @@ class graph_widget(QWidget):
         self.plot_widget.getAxis("bottom").setTextPen("#56616f")
         self.plot_widget.getAxis("left").setTextPen("#56616f")
         self.plot_item = self.plot_widget.getPlotItem()
+        self.set_rectangle_zoom_enabled(False)
         self._setup_right_axis()
         self._setup_hover_coordinates()
         layout.addWidget(self.plot_widget)
+
+    def set_rectangle_zoom_enabled(self, enabled: bool):
+        mouse_mode = pg.ViewBox.RectMode if enabled else pg.ViewBox.PanMode
+        self.plot_item.vb.setMouseMode(mouse_mode)
 
     def _setup_hover_coordinates(self):
         self.hover_marker = pg.ScatterPlotItem(
@@ -186,10 +198,43 @@ class graph_widget(QWidget):
 
     def plot_measurement(self, measurement, selection=None):
         self.measurement = measurement
-        self.live_dataset_views = []
-        self.live_axis_selection = None
+        self._clear_live_state()
         dataset_view = self._dataset_view_for_selection(measurement, selection)
         self._plot_dataset_view(dataset_view, selection)
+
+    def begin_live_measurement(self, event: LiveMeasurementStarted | None = None):
+        event = event or LiveMeasurementStarted()
+        if event.segment is None:
+            self._clear_live_state()
+            self.dataset_view_id = None
+        else:
+            if self.live_run is None:
+                self._clear_live_state()
+                self.live_run = LogicalMeasurementRun(event.run_title or "Live run")
+                self.dataset_view_id = None
+            self.live_active_segment = event.segment
+            self.live_arrays = {}
+            self.live_current_view = None
+            self._refresh_live_dataset_views()
+
+        self.measurement = None
+
+    def complete_live_segment(self, segment: MeasurementSegment):
+        if self.live_run is None:
+            return
+
+        self.live_run.add_segment(segment)
+        self.live_active_segment = None
+        self._refresh_live_dataset_views()
+        self._plot_selected_live_view()
+
+    def _clear_live_state(self):
+        self.live_dataset_views = []
+        self.live_arrays = {}
+        self.live_axis_selection = None
+        self.live_run = None
+        self.live_active_segment = None
+        self.live_current_view = None
 
     def _plot_dataset_view(self, dataset_view, selection=None):
         arrays = dataset_arrays(dataset_view.dataset) if dataset_view is not None else []
@@ -204,22 +249,6 @@ class graph_widget(QWidget):
             self.dataset_view_id = dataset_view.id
 
         if selection:
-            if selection["grouped"]:
-                left_x, left_y = self._concat_grouped_arrays(arrays, selection["x"], selection["left_y"])
-                if selection["right_y"] is None:
-                    self._plot_arrays(left_x, left_y, selection["x"], selection["left_y"])
-                    return
-                right_x, right_y = self._concat_grouped_arrays(arrays, selection["x"], selection["right_y"])
-                self._plot_dual_arrays(
-                    left_x,
-                    left_y,
-                    right_x,
-                    right_y,
-                    selection["x"],
-                    selection["left_y"],
-                    selection["right_y"],
-                )
-                return
             self.x_index = selection["x"]
             self.y_index = selection["left_y"]
             if selection["right_y"] is not None:
@@ -270,8 +299,15 @@ class graph_widget(QWidget):
         if dataset_view is None:
             return
 
-        self.live_dataset_views = [dataset_view]
+        self.live_current_view = dataset_view
+        self._refresh_live_dataset_views()
+        self._plot_selected_live_view()
+
+    def _plot_selected_live_view(self):
         selection = self.live_axis_selection
+        dataset_view = self._dataset_view_from_views(self.live_dataset_views, selection)
+        if dataset_view is None:
+            return
         if selection and selection.get("dataset_id") != dataset_view.id:
             selection = None
         self._plot_dataset_view(dataset_view, selection)
@@ -281,18 +317,73 @@ class graph_widget(QWidget):
         dataset_view = self._dataset_view_from_views(self.live_dataset_views, selection)
         self._plot_dataset_view(dataset_view, selection)
 
+    def _refresh_live_dataset_views(self):
+        views = self._accumulated_live_dataset_views()
+        if self.live_current_view is not None:
+            views.append(self.live_current_view)
+        self.live_dataset_views = views
+
+    def _accumulated_live_dataset_views(self):
+        if self.live_run is None:
+            return []
+
+        segments = list(self.live_run.segments)
+        if (
+            self.live_active_segment is not None
+            and self.live_current_view is not None
+            and not self.live_current_view.is_eis
+        ):
+            live_source = _LiveMeasurement(
+                self.live_active_segment.label,
+                self.live_current_view.dataset,
+            )
+            segments.append(replace(self.live_active_segment, source=live_source))
+
+        live_run = LogicalMeasurementRun(
+            f"{self.live_run.title} (live)",
+            segments,
+        )
+        views = measurement_dataset_views(
+            live_run,
+            include_individual_eis=False,
+        )
+        titles = {
+            "measurement": "Entire run (live)",
+            "eis": "Entire run EIS (live)",
+        }
+        return [replace(view, title=titles.get(view.id, view.title)) for view in views]
+
     def _live_dataset_view(self, callback_data):
         x_array = getattr(callback_data, "x_array", None)
         y_array = getattr(callback_data, "y_array", None)
         if x_array is not None and y_array is not None:
-            dataset = _LiveDataset("Live Data", (x_array, y_array))
-            return DatasetView("live", "Live Data", dataset, callback_data)
+            for data_array in (x_array, y_array):
+                self.live_arrays[self._live_array_key(data_array)] = data_array
+            dataset = _LiveDataset("Current step (live)", tuple(self.live_arrays.values()))
+            return DatasetView("live", "Current step (live)", dataset, callback_data)
 
         dataset = getattr(callback_data, "data", None)
         if dataset is None:
             return None
-        title = getattr(dataset, "title", None) or "Live EIS"
-        return DatasetView("eis_live", str(title), dataset, callback_data, is_eis=True)
+        return DatasetView(
+            "eis_live",
+            "Current step EIS (live)",
+            dataset,
+            callback_data,
+            is_eis=True,
+        )
+
+    @staticmethod
+    def _live_array_key(data_array):
+        name = str(_get_name(data_array, "") or "")
+        if name:
+            return ("name", name)
+        return (
+            "metadata",
+            str(getattr(data_array, "type", "") or ""),
+            str(getattr(data_array, "quantity", "") or ""),
+            str(_get_unit(data_array, "") or ""),
+        )
 
     def _plot_arrays(self, x_array, y_array, x_label, y_label):
         x_array = np.asarray(x_array).ravel()
@@ -395,54 +486,6 @@ class graph_widget(QWidget):
         self.right_view.setGeometry(self.plot_item.vb.sceneBoundingRect())
         self.right_view.linkedViewChanged(self.plot_item.vb, self.right_view.XAxis)
     
-    @staticmethod
-    def _concat_grouped_arrays(arrays, name_arr_1, name_arr_2):
-        pattern = re.compile(r"^(?P<measurement>[A-Za-z_]+?)(?P<measurement_number>\d+)_(?P<group>\d+)$")
-
-        groups = {}
-        for arr in arrays:
-            name = _get_name(arr, "")
-            match = pattern.match(name)
-            if not match:
-                continue
-
-            measurement = _canonical_measurement_name(match.group("measurement"))
-            if measurement not in {name_arr_1, name_arr_2}:
-                continue
-
-            group = int(match.group("group"))
-            grouped_arrays = groups.setdefault(group, {})
-            if measurement not in grouped_arrays or not match.group("measurement").startswith("Applied"):
-                grouped_arrays[measurement] = arr
-
-        concat_arr1 = []
-        concat_arr2 = []
-        for group in sorted(groups):
-            grouped_arrays = groups[group]
-            if name_arr_1 not in grouped_arrays or name_arr_2 not in grouped_arrays:
-                continue
-            x_values = np.asarray(grouped_arrays[name_arr_1].to_numpy()).ravel()
-            y_values = np.asarray(grouped_arrays[name_arr_2].to_numpy()).ravel()
-            if x_values.shape != y_values.shape:
-                continue
-            concat_arr1.extend(x_values)
-            concat_arr2.extend(y_values)
-
-        if concat_arr1 and concat_arr2:
-            return np.asarray(concat_arr1), np.asarray(concat_arr2)
-
-        x_array = next((arr for arr in arrays if _axis_group_name(arr) == name_arr_1), None)
-        y_array = next((arr for arr in arrays if _axis_group_name(arr) == name_arr_2), None)
-        if x_array is None or y_array is None:
-            return np.asarray([]), np.asarray([])
-
-        x_values = np.asarray(x_array.to_numpy()).ravel()
-        y_values = np.asarray(y_array.to_numpy()).ravel()
-        if x_values.shape != y_values.shape:
-            return np.asarray([]), np.asarray([])
-        return x_values, y_values
-
-
 class axis_selection_dialog(QDialog):
     def __init__(
         self,
@@ -460,7 +503,6 @@ class axis_selection_dialog(QDialog):
         self.x_combo = NoScrollComboBox(self)
         self.left_y_combo = NoScrollComboBox(self)
         self.right_y_combo = NoScrollComboBox(self)
-        self.checkbox = QCheckBox(self)
         self.dataset_views = dataset_views
         self.arrays = []
         self.current_x = current_x
@@ -471,13 +513,11 @@ class axis_selection_dialog(QDialog):
         self.rebuild_axis_choice() 
         
         self.dataset_combo.currentIndexChanged.connect(self.rebuild_axis_choice)
-        self.checkbox.toggled.connect(self.rebuild_axis_choice)
 
         layout.addRow("Dataset", self.dataset_combo)
         layout.addRow("X axis", self.x_combo)
         layout.addRow("Left Y axis", self.left_y_combo)
         layout.addRow("Right Y axis", self.right_y_combo)
-        layout.addRow("Group", self.checkbox)
         
 
         buttons = QDialogButtonBox(
@@ -504,38 +544,26 @@ class axis_selection_dialog(QDialog):
         self.right_y_combo.clear()
         dataset_view = self.selected_dataset_view()
         self.arrays = dataset_arrays(dataset_view.dataset) if dataset_view is not None else []
-        
-        if self.checkbox.isChecked():
-            measurement_names = self._unique_measurements()
-            self.right_y_combo.addItem("None", None)
-            for meas_name in measurement_names:
-                self.x_combo.addItem(meas_name, meas_name)
-                self.left_y_combo.addItem(meas_name, meas_name)
-                self.right_y_combo.addItem(meas_name, meas_name)
-            self._set_combo_to_data(self.x_combo, "Time")
-            self._set_combo_to_data(self.left_y_combo, "Potential")
-            self._set_combo_to_data(self.right_y_combo, "Current")
+
+        self.right_y_combo.addItem("None", None)
+        for index, data_array in enumerate(self.arrays):
+            if _is_metadata_array_name(_get_name(data_array, "")):
+                continue
+            label = self._format_array_label(index, data_array)
+            self.x_combo.addItem(label, index)
+            self.left_y_combo.addItem(label, index)
+            self.right_y_combo.addItem(label, index)
+        if self.dataset_combo.currentData() == self.current_dataset_id:
+            x_index = self.current_x
+            y_index = self.current_y
         else:
-            self.right_y_combo.addItem("None", None)
-            for index, data_array in enumerate(self.arrays):
-                if _is_metadata_array_name(_get_name(data_array, "")):
-                    continue
-                label = self._format_array_label(index, data_array)
-                self.x_combo.addItem(label, index)
-                self.left_y_combo.addItem(label, index)
-                self.right_y_combo.addItem(label, index)
-            if self.dataset_combo.currentData() == self.current_dataset_id:
-                x_index = self.current_x
-                y_index = self.current_y
-            else:
-                x_index, y_index = default_axis_indexes(self.arrays)
-            self._set_combo_to_data(self.x_combo, x_index)
-            self._set_combo_to_data(self.left_y_combo, y_index)
+            x_index, y_index = default_axis_indexes(self.arrays)
+        self._set_combo_to_data(self.x_combo, x_index)
+        self._set_combo_to_data(self.left_y_combo, y_index)
         
     def selected_axes(self):
         return {
             "dataset_id": self.dataset_combo.currentData(),
-            "grouped": self.checkbox.isChecked(),
             "x": self.x_combo.currentData(),
             "left_y": self.left_y_combo.currentData(),
             "right_y": self.right_y_combo.currentData(),
@@ -567,26 +595,11 @@ class axis_selection_dialog(QDialog):
             return f"{index}: {name} ({', '.join(details)})"
         return f"{index}: {name}"
 
-    def _unique_measurements(self):
-        pattern = re.compile(r"^(?P<measurement>[A-Za-z_]+?)(?P<measurement_number>\d+)_(?P<group>\d+)$")
-        names = []
-
-        for data_array in self.arrays:
-            name = _get_name(data_array, "")
-            match = pattern.match(name)
-            if match:
-                names.append(_canonical_measurement_name(match.group("measurement")))
-                continue
-            group_name = _axis_group_name(data_array)
-            if group_name:
-                names.append(group_name)
-
-        return sorted(set(names))
-
 class graph_panel(QFrame):
     run_requested = Signal()
     stop_requested = Signal()
     expand_requested = Signal(bool)
+    selection_requested = Signal()
 
     def __init__(self, title, instrument=None):
         super().__init__()
@@ -624,25 +637,60 @@ class graph_panel(QFrame):
         self.stop_action = QAction("Stop", self)
         self.expand_action = QAction("Expand", self)
         self.expand_action.setCheckable(True)
+        self.zoom_area_action = QAction("Zoom Area", self)
+        self.zoom_area_action.setCheckable(True)
+        self.zoom_area_action.setToolTip("Select an area to zoom; turn off to pan")
         self.axes_action = QAction("Edit Axes", self)
-        self.nearest_point_action = QAction("Nearest Point", self)
-        self.nearest_point_action.setCheckable(True)
-        self.nearest_point_action.setToolTip(
+        self.highlight_points_action = QAction("Highlight Points", self)
+        self.highlight_points_action.setCheckable(True)
+        self.highlight_points_action.setToolTip(
             "Snap hover values to the nearest visible point on the primary curve"
         )
+
+        self.view_menu = QMenu(self)
+        self.view_menu.addAction(self.zoom_area_action)
+        self.view_menu.addAction(self.highlight_points_action)
+        self.view_action = QAction("View", self)
+        self.view_action.setMenu(self.view_menu)
 
         self.toolbar.addAction(self.run_action)
         self.toolbar.addAction(self.stop_action)
         self.toolbar.addAction(self.expand_action)
         self.toolbar.addAction(self.axes_action)
-        self.toolbar.addAction(self.nearest_point_action)
+        self.toolbar.addAction(self.view_action)
+        view_button = self.toolbar.widgetForAction(self.view_action)
+        if isinstance(view_button, QToolButton):
+            view_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.toolbar.actionTriggered.connect(lambda _action: self.selection_requested.emit())
+        self.view_menu.triggered.connect(lambda _action: self.selection_requested.emit())
+        self.graph.plot_item.scene().sigMouseClicked.connect(
+            lambda _event: self.selection_requested.emit()
+        )
+
+        overflow_button = self.toolbar.findChild(QToolButton, "qt_toolbar_ext_button")
+        if overflow_button is not None:
+            overflow_button.setArrowType(Qt.ArrowType.NoArrow)
+            overflow_button.setText("...")
+            overflow_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            overflow_button.setToolTip("More graph actions")
 
         self.run_action.triggered.connect(self.run_requested.emit)
         self.stop_action.triggered.connect(self.stop_requested.emit)
         self.expand_action.toggled.connect(self.expand_requested.emit)
+        self.zoom_area_action.toggled.connect(self.graph.set_rectangle_zoom_enabled)
         self.axes_action.triggered.connect(self.edit_axes)
-        self.nearest_point_action.toggled.connect(self.graph.set_snap_hover_to_data)
+        self.highlight_points_action.toggled.connect(self.graph.set_snap_hover_to_data)
         self.set_running(False)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.selection_requested.emit()
+        super().mousePressEvent(event)
+
+    def set_selected(self, is_selected: bool):
+        self.setProperty("selected", is_selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def set_running(self, is_running: bool):
         self.run_action.setEnabled(not is_running)

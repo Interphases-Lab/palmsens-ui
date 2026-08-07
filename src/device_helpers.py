@@ -41,9 +41,6 @@ class discovered_device:
     name: str
     channels: list[ps.Instrument]
 
-    def channel_count(self):
-        return len(self.channels)
-
 
 def _device_group_key(instrument: ps.Instrument):
     if instrument.channel > 0: # Om det enheten har flera kanaler

@@ -19,7 +19,8 @@ from aurora_method_builder.methods import (
 )
 
 from src.bdf_export import BdfExportError, bdf_optional_quantity_choices, export_measurement_to_bdf_files
-from PySide6.QtCore import QObject, QSize, Signal, Slot, Qt, QThread, QProcess
+from src.channel_status import channel_status_snapshot
+from PySide6.QtCore import QObject, QSize, Signal, Qt, QProcess
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
@@ -48,9 +49,13 @@ from PySide6.QtWidgets import (
 )
 
 from src.graph import graph_panel
-from src.measurement_data import AuroraStepCompleted, LogicalMeasurementRun
+from src.measurement_data import (
+    AuroraStepCompleted,
+    LiveMeasurementStarted,
+    LogicalMeasurementRun,
+)
 from src.method_config import METHOD_ORDER, METHOD_SPECS, build_method
-from src.method_worker import measurement_worker
+from src.palmsens_service import palmsens_connection_service
 from src.temperature_chamber.temperature_controller import TemperatureProgress, TemperatureSettings
 from src.widgets import NoScrollComboBox
 import src.device_helpers as pslib
@@ -116,7 +121,7 @@ class bdf_export_dialog(QDialog):
         super().__init__(parent)
         self.file_type = "csv"
         self.setWindowTitle("Export BDF")
-        self.resize(640, 480)
+        self.resize(640, 620)
         self._checkboxes: list[tuple[QCheckBox, object]] = []
         self._quantity_checkboxes: list[tuple[QCheckBox, str]] = []
 
@@ -228,10 +233,8 @@ class bdf_export_dialog(QDialog):
         self.quantity_search_edit.setPlaceholderText("Search optional quantities")
         self.quantity_search_edit.setClearButtonEnabled(True)
         self.quantity_search_edit.textChanged.connect(self.filter_optional_quantities)
-        quantity_options_layout.addWidget(self.quantity_search_edit)
 
-        quantity_actions = QWidget(self)
-        quantity_actions_layout = QHBoxLayout(quantity_actions)
+        quantity_actions_layout = QHBoxLayout()
         quantity_actions_layout.setContentsMargins(0, 0, 0, 0)
         quantity_actions_layout.setSpacing(8)
 
@@ -239,10 +242,10 @@ class bdf_export_dialog(QDialog):
         select_all_button.clicked.connect(self.select_all_optional_quantities)
         clear_button = QPushButton("Clear", self)
         clear_button.clicked.connect(self.clear_optional_quantities)
+        quantity_actions_layout.addWidget(self.quantity_search_edit, 1)
         quantity_actions_layout.addWidget(select_all_button)
         quantity_actions_layout.addWidget(clear_button)
-        quantity_actions_layout.addStretch(1)
-        quantity_options_layout.addWidget(quantity_actions)
+        quantity_options_layout.addLayout(quantity_actions_layout)
 
         self.quantity_container = QWidget(self)
         self.quantity_layout = QVBoxLayout(self.quantity_container)
@@ -263,7 +266,8 @@ class bdf_export_dialog(QDialog):
 
         quantity_scroll_area = QScrollArea(self)
         quantity_scroll_area.setWidgetResizable(True)
-        quantity_scroll_area.setMinimumHeight(280)
+        quantity_scroll_area.setMinimumHeight(100)
+        quantity_scroll_area.setMaximumHeight(160)
         quantity_scroll_area.setWidget(self.quantity_container)
         quantity_options_layout.addWidget(quantity_scroll_area, 1)
         self.quantity_options_widget.setVisible(False)
@@ -323,10 +327,6 @@ class bdf_export_dialog(QDialog):
         self.quantity_options_widget.setVisible(is_visible)
         arrow_type = Qt.ArrowType.DownArrow if is_visible else Qt.ArrowType.RightArrow
         self.quantity_toggle_button.setArrowType(arrow_type)
-        if is_visible:
-            self.resize(self.width(), max(self.height(), 720))
-        else:
-            self.adjustSize()
 
     def select_all_optional_quantities(self):
         for checkbox, _ in self._quantity_checkboxes:
@@ -451,9 +451,6 @@ class method_configuration_dialog(QDialog):
             self.aurora_device_combo.addItem(label, value)
         self.package_run_form.addRow("PalmSens target", self.aurora_device_combo)
 
-        self.aurora_channel_label = QLabel(str(self.run_channel()), self.package_widget)
-        self.package_run_form.addRow("Channel", self.aurora_channel_label)
-
         self.aurora_scan_step_edit = QLineEdit("", self.package_widget)
         self.package_run_form.addRow("Scan step voltage (V)", self.aurora_scan_step_edit)
 
@@ -548,22 +545,8 @@ class method_configuration_dialog(QDialog):
         self.temperature_form.setVerticalSpacing(8)
         package_layout.addLayout(self.temperature_form)
 
-        self.temperature_port_edit = QLineEdit("", self.package_widget)
-        self.temperature_port_edit.setPlaceholderText("COM31 or blank for auto-detect")
-        self.temperature_form.addRow("Serial port", self.temperature_port_edit)
-
-        self.temperature_baud_edit = QLineEdit("9600", self.package_widget)
-        self.temperature_form.addRow("Baud rate", self.temperature_baud_edit)
-
         self.temperature_tolerance_edit = QLineEdit("0.5", self.package_widget)
         self.temperature_form.addRow("Tolerance (degC)", self.temperature_tolerance_edit)
-
-        self.temperature_poll_interval_edit = QLineEdit("1.0", self.package_widget)
-        self.temperature_form.addRow("Poll interval (s)", self.temperature_poll_interval_edit)
-
-        self.temperature_timeout_edit = QLineEdit("", self.package_widget)
-        self.temperature_timeout_edit.setPlaceholderText("Blank = no timeout")
-        self.temperature_form.addRow("Timeout (s)", self.temperature_timeout_edit)
 
         default_log_dir = Path(__file__).parent.parent / "out2" / "temp_logs"
         self.temperature_log_dir_edit = QLineEdit(str(default_log_dir), self.package_widget)
@@ -660,11 +643,7 @@ class method_configuration_dialog(QDialog):
     def update_temperature_fields(self):
         enabled = self.temperature_enabled_checkbox.isChecked()
         for widget in (
-            self.temperature_port_edit,
-            self.temperature_baud_edit,
             self.temperature_tolerance_edit,
-            self.temperature_poll_interval_edit,
-            self.temperature_timeout_edit,
             self.temperature_log_dir_edit,
             self.temperature_stop_on_abort_checkbox,
         ):
@@ -715,21 +694,11 @@ class method_configuration_dialog(QDialog):
             return None
 
         tolerance_c = self.parse_float(self.temperature_tolerance_edit, "Temperature tolerance")
-        poll_interval_s = self.parse_float(self.temperature_poll_interval_edit, "Temperature poll interval")
-        timeout_s = self.parse_optional_float(self.temperature_timeout_edit, "Temperature timeout")
         if tolerance_c <= 0:
             raise ValueError("Temperature tolerance must be greater than 0.")
-        if poll_interval_s <= 0:
-            raise ValueError("Temperature poll interval must be greater than 0.")
-        if timeout_s is not None and timeout_s <= 0:
-            raise ValueError("Temperature timeout must be greater than 0.")
 
         return TemperatureSettings(
-            port=self.temperature_port_edit.text().strip() or None,
-            baud_rate=self.parse_int(self.temperature_baud_edit, "Temperature baud rate"),
             tolerance_c=tolerance_c,
-            poll_interval_s=poll_interval_s,
-            timeout_s=timeout_s,
             log_dir=self.temperature_log_dir_edit.text().strip() or None,
             stop_on_abort=self.temperature_stop_on_abort_checkbox.isChecked(),
         )
@@ -918,8 +887,7 @@ class method_configuration_dialog(QDialog):
         source_name = self.imported_package_path.name if self.imported_package_path is not None else "Unknown"
         return (
             f"Package: {self.imported_package.name}\n"
-            f"Source file: {source_name}\n"
-            f"Run channel for this panel: {self.run_channel()}"
+            f"Source file: {source_name}"
         )
 
     @staticmethod
@@ -941,17 +909,6 @@ class method_configuration_dialog(QDialog):
             return float(raw_value)
         except ValueError as exc:
             raise ValueError(f"Invalid value for {label}: {raw_value}") from exc
-
-    @staticmethod
-    def parse_int(widget: QLineEdit, label: str) -> int:
-        raw_value = widget.text().strip()
-        if not raw_value:
-            raise ValueError(f"{label} is required.")
-        try:
-            return int(raw_value)
-        except ValueError as exc:
-            raise ValueError(f"Invalid value for {label}: {raw_value}") from exc
-
 
 class list_choices(QWidget):
     def __init__(self):
@@ -976,7 +933,7 @@ class list_choices(QWidget):
         return None
 
 
-class device_manager(QObject):
+class device_state(QObject):
     connected = Signal(object)
     disconnected = Signal()
     connection_changed = Signal(bool)
@@ -986,7 +943,7 @@ class device_manager(QObject):
         self.is_connected = False
         self.device = None
 
-    def connect_device(self, dev: pslib.discovered_device):
+    def set_connected_device(self, dev: pslib.discovered_device):
         if self.is_connected:
             return
 
@@ -995,7 +952,7 @@ class device_manager(QObject):
         self.connected.emit(dev)
         self.connection_changed.emit(True)
 
-    def disconnect_device(self):
+    def clear_connected_device(self):
         if not self.is_connected or self.device is None:
             return
 
@@ -1006,29 +963,28 @@ class device_manager(QObject):
 
 
 class main_window(QMainWindow):
-    worker_progress = Signal(object, object)
-    worker_finished = Signal(object, object)
-    worker_failed = Signal(object, str)
-    worker_thread_finished = Signal(object)
-
     def __init__(self):
         super().__init__()
         self.panels: list[graph_panel] = []
         self.expanded_panel: graph_panel | None = None
-        self.active_runs: dict[graph_panel, tuple[QThread, measurement_worker]] = {}
+        self.active_runs: dict[graph_panel, int] = {}
         self.stopping_panels: set[graph_panel] = set()
-        self.worker_panels: dict[measurement_worker, graph_panel] = {}
-        self.worker_method_labels: dict[measurement_worker, str] = {}
-        self.worker_bdf_auto_save_settings: dict[measurement_worker, BdfAutoSaveSettings] = {}
-        self.worker_bdf_auto_save_sequences: dict[measurement_worker, set[int]] = {}
-        self.worker_bdf_auto_save_failed: set[measurement_worker] = set()
-        self.thread_panels: dict[QThread, graph_panel] = {}
+        self.next_run_id = 1
+        self.run_panels: dict[int, graph_panel] = {}
+        self.run_method_labels: dict[int, str] = {}
+        self.run_bdf_auto_save_settings: dict[int, BdfAutoSaveSettings] = {}
+        self.run_bdf_auto_save_sequences: dict[int, set[int]] = {}
+        self.run_bdf_auto_save_failed: set[int] = set()
+        self.selected_panel: graph_panel | None = None
+        self.channel_statuses: dict[graph_panel, channel_status_snapshot] = {}
+        self.pending_device = None
 
         self.setWindowTitle("Palmsens demo")
         self.resize(1200, 760)
         self.setMinimumSize(900, 600)
 
-        self.device_manager = device_manager()
+        self.device_state = device_state()
+        self.connection_service = palmsens_connection_service(self)
 
         toolbar = QToolBar("Main Toolbar")
         toolbar.setObjectName("mainToolbar")
@@ -1036,10 +992,10 @@ class main_window(QMainWindow):
         toolbar.setIconSize(QSize(18, 18))
         self.addToolBar(toolbar)
 
-        scan_action = QAction("Connect", self)
-        scan_action.setStatusTip("Scan for available devices")
-        scan_action.triggered.connect(self.scan_devices)
-        toolbar.addAction(scan_action)
+        self.connect_action = QAction("Connect", self)
+        self.connect_action.setStatusTip("Scan for available devices")
+        self.connect_action.triggered.connect(self.scan_devices)
+        toolbar.addAction(self.connect_action)
 
         self.disconnect_action = QAction("Disconnect", self)
         self.disconnect_action.setStatusTip("Disconnect from device")
@@ -1085,16 +1041,23 @@ class main_window(QMainWindow):
         )
         toolbar.addWidget(self.debug_device_checkbox)
 
+        self.channel_status_label = QLabel("Select a channel to view its status", self)
+        self.channel_status_label.setObjectName("channelStatus")
+        self.statusBar().addPermanentWidget(self.channel_status_label, 1)
+
         self.connection_indicator = connection_indicator()
         self.statusBar().addPermanentWidget(self.connection_indicator)
 
-        self.device_manager.connected.connect(self.on_connect)
-        self.device_manager.disconnected.connect(self.on_disconnect)
-        self.device_manager.connection_changed.connect(self.update_connection)
-        self.worker_progress.connect(self.handle_worker_progress)
-        self.worker_finished.connect(self.handle_worker_finished)
-        self.worker_failed.connect(self.handle_worker_failed)
-        self.worker_thread_finished.connect(self.handle_worker_thread_finished)
+        self.device_state.connected.connect(self.on_connect)
+        self.device_state.disconnected.connect(self.on_disconnect)
+        self.device_state.connection_changed.connect(self.update_connection)
+        self.connection_service.connected.connect(self.on_service_connected)
+        self.connection_service.connection_failed.connect(self.on_service_connection_failed)
+        self.connection_service.disconnected.connect(self.on_service_disconnected)
+        self.connection_service.status_received.connect(self.handle_channel_status)
+        self.connection_service.measurement_progress.connect(self.handle_measurement_progress)
+        self.connection_service.measurement_finished.connect(self.handle_measurement_finished)
+        self.connection_service.measurement_failed.connect(self.handle_measurement_failed)
 
         self.panel_conainer = QWidget()
         self.panel_conainer.setObjectName("panelContainer")
@@ -1111,7 +1074,7 @@ class main_window(QMainWindow):
         self.setCentralWidget(self.panel_scroll_area)
 
     def scan_devices(self):
-        if self.device_manager.is_connected:
+        if self.device_state.is_connected or self.connection_service.is_running:
             QMessageBox.information(
                 self,
                 "Already connected",
@@ -1138,7 +1101,19 @@ class main_window(QMainWindow):
         if dialog.exec():
             selected = dialog.selected_device
         if selected is not None:
-            self.device_manager.connect_device(selected)
+            self.pending_device = selected
+            self.connect_action.setEnabled(False)
+            self.statusBar().showMessage(f"Connecting to {selected.name}...", 0)
+            try:
+                self.connection_service.start(selected.channels)
+            except Exception as exc:
+                self.pending_device = None
+                self.connect_action.setEnabled(True)
+                QMessageBox.critical(
+                    self,
+                    "Connection failed",
+                    f"Could not start the PalmSens connection:\n{exc}",
+                )
 
     def request_disconnect(self):
         if self.active_runs:
@@ -1149,7 +1124,7 @@ class main_window(QMainWindow):
             )
             return
 
-        if not self.device_manager.is_connected:
+        if not self.device_state.is_connected:
             return
 
         answer = QMessageBox.question(
@@ -1162,10 +1137,42 @@ class main_window(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        self.device_manager.disconnect_device()
+        if not self.connection_service.stop(wait=True):
+            QMessageBox.warning(
+                self,
+                "Disconnect failed",
+                "Could not close the PalmSens connections. Try again.",
+            )
+            return
+        self.device_state.clear_connected_device()
 
     def update_connection(self, is_connected: bool):
         self.disconnect_action.setEnabled(is_connected)
+        self.connect_action.setEnabled(not is_connected)
+
+    def on_service_connected(self):
+        device = self.pending_device
+        self.pending_device = None
+        if device is None:
+            self.connection_service.stop()
+            return
+        self.device_state.set_connected_device(device)
+        self.statusBar().showMessage(f"Connected to {device.name}.", 5000)
+
+    def on_service_connection_failed(self, error: str):
+        self.pending_device = None
+        self.connect_action.setEnabled(True)
+        self.statusBar().showMessage("PalmSens connection failed.", 5000)
+        QMessageBox.critical(
+            self,
+            "Connection failed",
+            f"Could not connect to the PalmSens channels:\n{error}",
+        )
+
+    def on_service_disconnected(self):
+        self.pending_device = None
+        self.connect_action.setEnabled(True)
+        self.device_state.clear_connected_device()
 
     def open_aurora_builder(self):
         project_dir = Path(__file__).parent.parent
@@ -1184,6 +1191,7 @@ class main_window(QMainWindow):
             self.add_panel(self._panel_title(instrument), instrument=instrument)
 
     def on_disconnect(self):
+        self.clear_panel_selection()
         self.connection_indicator.set_status(False)
         self.clear_panels()
 
@@ -1248,9 +1256,9 @@ class main_window(QMainWindow):
 
     def export_bdf(self):
         exportable_panels = self._exportable_panels()
-        if not exportable_panels:
-            QMessageBox.warning(self, "Export error", "No channel measurements available to export.")
-            return
+        # if not exportable_panels:
+            # QMessageBox.warning(self, "Export error", "No channel measurements available to export.")
+            # return
 
         dialog = bdf_export_dialog(exportable_panels, self)
         if not dialog.exec():
@@ -1306,12 +1314,75 @@ class main_window(QMainWindow):
         panel = graph_panel(title, instrument=instrument)
         panel.run_requested.connect(lambda panel=panel: self.run_measurement(panel))
         panel.stop_requested.connect(lambda panel=panel: self.stop_measurement(panel))
+        panel.selection_requested.connect(lambda panel=panel: self.select_panel(panel))
         panel.expand_requested.connect(
             lambda is_expanded, panel=panel: self.set_panel_expanded(panel, is_expanded)
         )
         self.panels.append(panel)
         self.refresh_panel_grid()
         return panel
+
+    def select_panel(self, panel: graph_panel):
+        if panel not in self.panels:
+            return
+
+        if self.selected_panel is panel:
+            return
+
+        if self.selected_panel is not None:
+            self.selected_panel.set_selected(False)
+
+        self.selected_panel = panel
+        panel.set_selected(True)
+        if panel in self.active_runs:
+            self.channel_status_label.setText(f"{panel.base_title} | Measurement running")
+        else:
+            self._show_selected_channel_status()
+
+    def clear_panel_selection(self):
+        if self.selected_panel is not None:
+            self.selected_panel.set_selected(False)
+        self.selected_panel = None
+        self.channel_statuses.clear()
+        self.channel_status_label.setText("Select a channel to view its status")
+
+    def handle_channel_status(self, instrument, status: channel_status_snapshot):
+        panel = self._panel_for_instrument(instrument)
+        if panel is None:
+            return
+        self.channel_statuses[panel] = status
+        if panel is self.selected_panel and panel not in self.active_runs:
+            self._show_selected_channel_status()
+
+    def _panel_for_instrument(self, instrument):
+        return next(
+            (panel for panel in self.panels if panel.instrument is instrument),
+            None,
+        )
+
+    def _show_selected_channel_status(self):
+        panel = self.selected_panel
+        if panel is None:
+            self.channel_status_label.setText("Select a channel to view its status")
+            return
+
+        status = self.channel_statuses.get(panel)
+        if status is None:
+            if getattr(panel.instrument, "interface", None) == "mock":
+                text = f"{panel.base_title} | Status unavailable for mock device"
+            else:
+                text = f"{panel.base_title} | Waiting for idle status..."
+            self.channel_status_label.setText(text)
+            return
+
+        parts = [
+            panel.base_title,
+            status.device_state,
+            f"Potential: {status.potential_v:.3f} V",
+        ]
+        if status.current_ua is not None:
+            parts.append(f"Current: {status.current_ua:.3f} µA")
+        self.channel_status_label.setText(" | ".join(parts))
 
     def set_panel_expanded(self, panel: graph_panel, is_expanded: bool):
         if panel not in self.panels:
@@ -1357,6 +1428,7 @@ class main_window(QMainWindow):
             panel.deleteLater()
 
     def run_measurement(self, panel: graph_panel):
+        self.select_panel(panel)
         if panel.instrument is None:
             QMessageBox.warning(
                 self,
@@ -1385,6 +1457,7 @@ class main_window(QMainWindow):
                     f"Could not create BDF auto-save folder:\n{exc}",
                 )
                 return
+
         self.start_measurement(
             panel,
             method,
@@ -1401,53 +1474,48 @@ class main_window(QMainWindow):
         temperature_settings=None,
         bdf_auto_save_settings: BdfAutoSaveSettings | None = None,
     ):
-        thread = QThread(self)
-        worker = measurement_worker(
-            panel.instrument,
-            method,
-            temperature_settings=temperature_settings,
-        )
-        worker.moveToThread(thread)
-        self.worker_panels[worker] = panel
-        self.worker_method_labels[worker] = method_label
+        run_id = self.next_run_id
+        self.next_run_id += 1
+
+        self.run_panels[run_id] = panel
+        self.run_method_labels[run_id] = method_label
         if bdf_auto_save_settings is not None:
-            self.worker_bdf_auto_save_settings[worker] = bdf_auto_save_settings
-            self.worker_bdf_auto_save_sequences[worker] = set()
-        self.thread_panels[thread] = panel
+            self.run_bdf_auto_save_settings[run_id] = bdf_auto_save_settings
+            self.run_bdf_auto_save_sequences[run_id] = set()
 
-        thread.started.connect(worker.run)
-        worker.progress.connect(lambda data, worker=worker: self.worker_progress.emit(worker, data))
-        worker.finished.connect(lambda measurement, worker=worker: self.worker_finished.emit(worker, measurement))
-        worker.failed.connect(lambda error, worker=worker: self.worker_failed.emit(worker, error))
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda thread=thread: self.worker_thread_finished.emit(thread))
-
-        self.active_runs[panel] = (thread, worker)
+        self.active_runs[panel] = run_id
         panel.set_running(True)
         panel.set_status_text("Running")
+        if panel is self.selected_panel:
+            self.channel_status_label.setText(f"{panel.base_title} | Measurement running")
         self.statusBar().showMessage(f"Running {method_label} on {panel.base_title}...", 0)
-        thread.start()
+        self.connection_service.start_measurement(
+            run_id,
+            panel.instrument,
+            method,
+            temperature_settings,
+        )
 
     def stop_measurement(self, panel: graph_panel):
-        run_context = self.active_runs.get(panel)
-        if run_context is None:
+        run_id = self.active_runs.get(panel)
+        if run_id is None:
             return
 
-        _, worker = run_context
         self.stopping_panels.add(panel)
         panel.set_status_text("Stopping")
         self.statusBar().showMessage(f"Stopping measurement on {panel.base_title}...", 0)
-        worker.abort()
+        self.connection_service.abort_measurement(run_id)
 
-    def handle_worker_progress(self, worker, callback_data):
-        panel = self.worker_panels.get(worker)
+    def handle_measurement_progress(self, run_id, callback_data):
+        panel = self.run_panels.get(run_id)
         if panel is None or panel not in self.panels:
             return
+        if isinstance(callback_data, LiveMeasurementStarted):
+            panel.graph.begin_live_measurement(callback_data)
+            return
         if isinstance(callback_data, AuroraStepCompleted):
-            self.auto_save_aurora_step_bdf(worker, panel, callback_data.segment)
+            panel.graph.complete_live_segment(callback_data.segment)
+            self.auto_save_aurora_step_bdf(run_id, panel, callback_data.segment)
             return
         if isinstance(callback_data, TemperatureProgress):
             panel.set_status_text(callback_data.message)
@@ -1455,8 +1523,8 @@ class main_window(QMainWindow):
             return
         panel.graph.plot_live_data(callback_data)
 
-    def auto_save_aurora_step_bdf(self, worker, panel: graph_panel, segment):
-        settings = self.worker_bdf_auto_save_settings.get(worker)
+    def auto_save_aurora_step_bdf(self, run_id, panel: graph_panel, segment):
+        settings = self.run_bdf_auto_save_settings.get(run_id)
         if settings is None:
             return
 
@@ -1468,7 +1536,7 @@ class main_window(QMainWindow):
                     segment.index,
                 )
             else:
-                used_sequence_numbers = self.worker_bdf_auto_save_sequences.setdefault(worker, set())
+                used_sequence_numbers = self.run_bdf_auto_save_sequences.setdefault(run_id, set())
                 sequence_number = self._next_bdf_sequence_number(
                     settings.output_dir,
                     settings.cell_name,
@@ -1489,10 +1557,10 @@ class main_window(QMainWindow):
                 settings.optional_quantity_keys,
             )
         except BdfExportError as exc:
-            self._report_bdf_auto_save_failure(worker, panel, str(exc))
+            self._report_bdf_auto_save_failure(run_id, panel, str(exc))
             return
         except Exception as exc:
-            self._report_bdf_auto_save_failure(worker, panel, f"Failed to auto-save BDF files:\n{exc}")
+            self._report_bdf_auto_save_failure(run_id, panel, f"Failed to auto-save BDF files:\n{exc}")
             return
 
         self.statusBar().showMessage(
@@ -1500,48 +1568,31 @@ class main_window(QMainWindow):
             5000,
         )
 
-    def _report_bdf_auto_save_failure(self, worker, panel: graph_panel, message: str):
+    def _report_bdf_auto_save_failure(self, run_id, panel: graph_panel, message: str):
         self.statusBar().showMessage(f"BDF auto-save failed on {panel.base_title}.", 5000)
-        if worker in self.worker_bdf_auto_save_failed:
+        if run_id in self.run_bdf_auto_save_failed:
             return
-        self.worker_bdf_auto_save_failed.add(worker)
+        self.run_bdf_auto_save_failed.add(run_id)
         QMessageBox.warning(
             self,
             "BDF auto-save failed",
             f"{panel.base_title} could not auto-save a BDF file:\n{message}",
         )
 
-    def handle_worker_finished(self, worker, measurement):
-        panel = self.worker_panels.get(worker)
+    def handle_measurement_finished(self, run_id, measurement):
+        panel = self.run_panels.get(run_id)
         if panel is None:
             return
-        method_label = self.worker_method_labels.get(worker, "Measurement")
+        method_label = self.run_method_labels.get(run_id, "Measurement")
         self.on_measurement_finished(panel, method_label, measurement)
+        self.cleanup_run(panel, run_id)
 
-    def handle_worker_failed(self, worker, error: str):
-        panel = self.worker_panels.get(worker)
+    def handle_measurement_failed(self, run_id, error: str):
+        panel = self.run_panels.get(run_id)
         if panel is None:
             return
         self.on_measurement_failed(panel, error)
-
-    def handle_worker_thread_finished(self, thread):
-        panel = self.thread_panels.pop(thread, None)
-        if panel is None:
-            return
-        self.cleanup_run(panel)
-
-        worker_to_remove = None
-        for worker, worker_panel in self.worker_panels.items():
-            if worker_panel is panel:
-                worker_to_remove = worker
-                break
-
-        if worker_to_remove is not None:
-            self.worker_panels.pop(worker_to_remove, None)
-            self.worker_method_labels.pop(worker_to_remove, None)
-            self.worker_bdf_auto_save_settings.pop(worker_to_remove, None)
-            self.worker_bdf_auto_save_sequences.pop(worker_to_remove, None)
-            self.worker_bdf_auto_save_failed.discard(worker_to_remove)
+        self.cleanup_run(panel, run_id)
 
     def on_measurement_finished(self, panel: graph_panel, method_label: str, measurement):
         if panel in self.stopping_panels:
@@ -1573,11 +1624,21 @@ class main_window(QMainWindow):
             f"{panel.base_title} failed:\n{error}",
         )
 
-    def cleanup_run(self, panel: graph_panel):
-        self.active_runs.pop(panel, None)
+    def cleanup_run(self, panel: graph_panel, run_id: int):
+        if self.active_runs.get(panel) == run_id:
+            self.active_runs.pop(panel, None)
+        self.run_panels.pop(run_id, None)
+        self.run_method_labels.pop(run_id, None)
+        self.run_bdf_auto_save_settings.pop(run_id, None)
+        self.run_bdf_auto_save_sequences.pop(run_id, None)
+        self.run_bdf_auto_save_failed.discard(run_id)
         self.stopping_panels.discard(panel)
         if panel in self.panels:
             panel.set_running(False)
+        if panel is self.selected_panel:
+            self.channel_status_label.setText(
+                f"{panel.base_title} | Waiting for idle status..."
+            )
 
     def _measurements(self):
         return [
@@ -1651,12 +1712,6 @@ class main_window(QMainWindow):
         stem = cls._bdf_export_stem(cell_name, cas_id, sequence_number)
         return any(output_dir.glob(f"{stem}*.bdf.{export_type}"))
 
-    def _panel_export_stem(self, panel: graph_panel) -> str:
-        instrument = panel.instrument
-        if instrument is not None and getattr(instrument, "channel", -1) > 0:
-            return f"CH_{instrument.channel}"
-        return self._sanitize_export_name(panel.base_title)
-
     @staticmethod
     def _panel_title(instrument):
         if getattr(instrument, "channel", -1) > 0: # Kolla om multichannel
@@ -1673,6 +1728,14 @@ class main_window(QMainWindow):
             event.ignore()
             return
 
+        if not self.connection_service.stop(wait=True):
+            QMessageBox.warning(
+                self,
+                "Disconnect failed",
+                "Could not close the PalmSens connections.",
+            )
+            event.ignore()
+            return
         super().closeEvent(event)
 
 

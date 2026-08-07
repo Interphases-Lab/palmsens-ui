@@ -448,9 +448,10 @@ def _is_open_circuit_group(group) -> bool:
     return False
 
 
-def _is_open_circuit_step_type(value) -> bool: # Behövs pga ocv inte innehåller ström som gör att den saknas i bdf export
+def _is_open_circuit_step_type(value) -> bool:
+    # Temperature steps are recorded with open-circuit potentiometry.
     normalized = _normalize_text(value)
-    return normalized in {"opencircuitvoltage", "ocv"}
+    return normalized in {"opencircuitvoltage", "ocv", "temperature"}
 
 
 def _raw_dependency_keys(optional_quantity_keys: set[str] | None) -> set[str]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import OrderedDict
 from dataclasses import dataclass, field
 import math
@@ -19,6 +20,13 @@ class DatasetView:
 
 
 @dataclass(frozen=True)
+class TemperatureSample:
+    elapsed_s: float
+    temperature_c: float
+    setpoint_c: float
+
+
+@dataclass(frozen=True)
 class MeasurementSegment:
     index: int
     label: str
@@ -27,11 +35,18 @@ class MeasurementSegment:
     source_step_index: int | None = None
     step_type: str | None = None
     execution_index: int | None = None
+    temperature_samples: tuple[TemperatureSample, ...] = ()
 
 
 @dataclass(frozen=True)
 class AuroraStepCompleted:
     segment: MeasurementSegment
+
+
+@dataclass(frozen=True)
+class LiveMeasurementStarted:
+    run_title: str | None = None
+    segment: MeasurementSegment | None = None
 
 
 @dataclass
@@ -294,6 +309,12 @@ def _unify_segment_datasets(
                 source_values[key] = fitted_values
                 source_priorities[key] = priority
 
+        for data_array in _segment_temperature_arrays(segment, arrays, row_count):
+            key = _data_array_identity(data_array, len(source_values))
+            metadata_by_key.setdefault(key, _data_array_metadata(data_array, key))
+            source_values[key] = _array_values(data_array)
+            source_priorities[key] = 1
+
         for key in values_by_key:
             if key not in source_values:
                 values_by_key[key].extend(_missing_values(row_count))
@@ -375,6 +396,66 @@ def _array_values(data_array) -> list[Any]:
     return array.tolist()
 
 
+def _segment_temperature_arrays(
+    segment: MeasurementSegment,
+    source_arrays: list[Any],
+    row_count: int,
+) -> list[UnifiedDataArray]:
+    samples = segment.temperature_samples
+    if not samples:
+        return []
+
+    elapsed_values = _measurement_elapsed_values(source_arrays, row_count)
+    return [
+        UnifiedDataArray(
+            name="ChamberTemperature",
+            unit="degC",
+            type="Temperature",
+            quantity="chamber_temperature",
+            values=tuple(
+                _align_temperature_samples(samples, elapsed_values, "temperature_c", row_count)
+            ),
+        ),
+        UnifiedDataArray(
+            name="ChamberSetpoint",
+            unit="degC",
+            type="TemperatureT1",
+            quantity="temperature_t1",
+            values=tuple(
+                _align_temperature_samples(samples, elapsed_values, "setpoint_c", row_count)
+            ),
+        ),
+    ]
+
+
+def _measurement_elapsed_values(source_arrays: list[Any], row_count: int) -> list[float] | None:
+    time_array = next((data_array for data_array in source_arrays if _is_time_array(data_array)), None)
+    if time_array is None:
+        return None
+
+    try:
+        return [float(value) for value in _fit_values(_array_values(time_array), row_count)]
+    except (TypeError, ValueError):
+        return None
+
+
+def _align_temperature_samples(
+    samples: tuple[TemperatureSample, ...],
+    elapsed_values: list[float] | None,
+    attribute: str,
+    row_count: int,
+) -> list[float]:
+    sample_values = [float(getattr(sample, attribute)) for sample in samples]
+    if elapsed_values is None:
+        return [sample_values[-1]] * row_count
+
+    sample_times = [sample.elapsed_s for sample in samples]
+    return [
+        sample_values[max(0, bisect_right(sample_times, elapsed_s) - 1)]
+        for elapsed_s in elapsed_values
+    ]
+
+
 def _fit_values(values: list[Any], length: int) -> list[Any]:
     if len(values) == length:
         return values
@@ -423,6 +504,8 @@ def _canonical_array_name(name: str, array_type: str, quantity: str) -> str | No
 
     if normalized.intersection({"time", "testtime", "elapsedtime"}):
         return "Time"
+    if normalized.intersection({"potentialwevsce", "wevscepotential"}):
+        return "PotentialWEvsCE"
     if normalized.intersection({"potential", "appliedpotential", "voltage", "appliedvoltage"}):
         return "Potential"
     if normalized.intersection({"current", "appliedcurrent"}):

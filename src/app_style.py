@@ -56,6 +56,10 @@ QFrame#graphPanel {
     border-radius: 8px;
 }
 
+QFrame#graphPanel[selected="true"] {
+    border: 2px solid #8fb9dc;
+}
+
 QFrame#auroraOptionsCard {
     background: #ffffff;
     border: 1px solid #d8dee6;
@@ -103,6 +107,11 @@ QScrollArea#panelScrollArea {
 
 QLabel#connectionIndicator {
     font-weight: 600;
+    padding: 2px 8px;
+}
+
+QLabel#channelStatus {
+    color: #334155;
     padding: 2px 8px;
 }
 
