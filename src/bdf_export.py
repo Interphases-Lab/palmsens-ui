@@ -379,8 +379,8 @@ def _extract_bdf_series(group, optional_quantity_keys: set[str] | None = None) -
         quantity = getattr(data_array, "quantity", "")
         unit = getattr(data_array, "unit", "")
         values = data_array.to_numpy()
-
         column_key = _detect_bdf_column(base_key, array_name, array_type, quantity, unit)
+
         if column_key is None or column_key in series:
             continue
         if optional_quantity_keys is not None:
@@ -728,11 +728,6 @@ def _detect_bdf_column(base_key: str, array_name: str, array_type: str, quantity
     )
     unit_key = _normalize_unit(unit)
     raw_unit = str(unit).strip()
-
-    # This is another voltage array, so identify it before generic aliases such
-    # as "potential" or the voltage-unit fallback can claim it.
-    if any(identifier in text for text in texts for identifier in _WEVSCE_IDENTIFIERS):
-        return "voltage_wevsce_volt"
 
     for text in texts:
         column_key = _BDF_ALIAS_TO_KEY.get(text)
