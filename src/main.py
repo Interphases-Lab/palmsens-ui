@@ -1,4 +1,6 @@
 import sys
+import time
+import html
 from datetime import date
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,7 +23,7 @@ from aurora_method_builder.methods import (
 
 from src.bdf_export import BdfExportError, bdf_optional_quantity_choices, export_measurement_to_bdf_files
 from src.channel_status import channel_status_snapshot
-from PySide6.QtCore import QObject, QSize, Signal, Qt, QProcess
+from PySide6.QtCore import QObject, QSize, Signal, Qt, QProcess, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
@@ -40,6 +42,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -116,6 +119,8 @@ class BdfAutoSaveSettings:
     custom_naming_enabled: bool = False
     custom_base_name: str = ""
     include_step_type: bool = False
+    after_each_step: bool = True
+    combined_file: bool = False
 
 
 @dataclass(frozen=True)
@@ -144,6 +149,7 @@ class MeasurementEditorState:
     temperature_log_dir: str
     temperature_stop_on_abort: bool
     temperature_sync_channels: bool
+    auto_bdf_combined: bool = False
 
 
 @dataclass(frozen=True)
@@ -627,6 +633,7 @@ class method_configuration_dialog(QDialog):
         self.run_mode_combo.addItem("PalmSens method", "native")
         self.run_mode_combo.addItem("Imported package", "aurora_package")
         self.run_mode_combo.addItem("MethodScript", "methodscript")
+        self.run_mode_combo.setCurrentIndex(1)
         self.form_layout.addRow("Run type", self.run_mode_combo)
 
         self.method_combo = NoScrollComboBox(self)
@@ -656,7 +663,13 @@ class method_configuration_dialog(QDialog):
 
         self.load_package_button = QPushButton("Load Package", self.package_widget)
         self.load_package_button.clicked.connect(self.load_aurora_package_file)
-        package_layout.addWidget(self.load_package_button, 0, Qt.AlignmentFlag.AlignLeft)
+        package_buttons = QHBoxLayout()
+        package_buttons.addWidget(self.load_package_button)
+        self.view_package_button = QPushButton("View Package", self.package_widget)
+        self.view_package_button.clicked.connect(self.view_aurora_package)
+        package_buttons.addWidget(self.view_package_button)
+        package_buttons.addStretch()
+        package_layout.addLayout(package_buttons)
 
         self.package_run_form = QFormLayout()
         self.package_run_form.setContentsMargins(0, 0, 0, 0)
@@ -734,6 +747,9 @@ class method_configuration_dialog(QDialog):
             self.package_widget,
         )
         package_layout.addWidget(self.aurora_auto_bdf_checkbox)
+        self.aurora_combined_bdf_checkbox = QCheckBox("Save entire run as a single BDF file on completion/stop", self.package_widget)
+        package_layout.addWidget(self.aurora_combined_bdf_checkbox)
+        self.aurora_combined_bdf_checkbox.toggled.connect(self.update_auto_bdf_fields)
 
         self.aurora_auto_bdf_widget = QWidget(self.package_widget)
         aurora_auto_bdf_layout = QGridLayout(self.aurora_auto_bdf_widget)
@@ -974,6 +990,7 @@ class method_configuration_dialog(QDialog):
             aurora_scan_step=self.aurora_scan_step_edit.text(),
             additional_measurements=self.selected_additional_measurements(),
             auto_bdf_enabled=self.aurora_auto_bdf_checkbox.isChecked(),
+            auto_bdf_combined=self.aurora_combined_bdf_checkbox.isChecked(),
             auto_bdf_output_dir=self.aurora_auto_bdf_dir_edit.text(),
             auto_bdf_export_type=str(self.aurora_auto_bdf_type_combo.currentData() or "csv"),
             auto_bdf_cell_name=self.aurora_auto_bdf_cell_name_edit.text(),
@@ -1011,6 +1028,7 @@ class method_configuration_dialog(QDialog):
             checkbox.setChecked(checkbox.isEnabled() and var_type in selected_measurements)
 
         self.aurora_auto_bdf_checkbox.setChecked(state.auto_bdf_enabled)
+        self.aurora_combined_bdf_checkbox.setChecked(state.auto_bdf_combined)
         self.aurora_auto_bdf_dir_edit.setText(state.auto_bdf_output_dir)
         self._set_combo_value(self.aurora_auto_bdf_type_combo, state.auto_bdf_export_type)
         self.aurora_auto_bdf_cell_name_edit.setText(state.auto_bdf_cell_name)
@@ -1072,7 +1090,7 @@ class method_configuration_dialog(QDialog):
             self.aurora_auto_bdf_dir_edit.setText(directory)
 
     def update_auto_bdf_fields(self):
-        enabled = self.aurora_auto_bdf_checkbox.isChecked()
+        enabled = self.aurora_auto_bdf_checkbox.isChecked() or self.aurora_combined_bdf_checkbox.isChecked()
         self.aurora_auto_bdf_widget.setVisible(enabled)
         custom_naming = self.aurora_custom_naming_checkbox.isChecked()
         self.aurora_custom_base_name_edit.setEnabled(custom_naming)
@@ -1102,7 +1120,7 @@ class method_configuration_dialog(QDialog):
         )
 
     def build_bdf_auto_save_settings(self) -> BdfAutoSaveSettings | None:
-        if not self.aurora_auto_bdf_checkbox.isChecked():
+        if not (self.aurora_auto_bdf_checkbox.isChecked() or self.aurora_combined_bdf_checkbox.isChecked()):
             return None
 
         raw_output_dir = self.aurora_auto_bdf_dir_edit.text().strip()
@@ -1123,6 +1141,8 @@ class method_configuration_dialog(QDialog):
             custom_naming_enabled=custom_naming,
             custom_base_name=custom_base_name,
             include_step_type=self.aurora_custom_step_type_checkbox.isChecked(),
+            after_each_step=self.aurora_auto_bdf_checkbox.isChecked(),
+            combined_file=self.aurora_combined_bdf_checkbox.isChecked(),
         )
 
     @staticmethod
@@ -1301,6 +1321,17 @@ class method_configuration_dialog(QDialog):
             self.build_aurora_export_settings(),
         )
 
+    def view_aurora_package(self):
+        if self.imported_package is None:
+            QMessageBox.information(self, "No package", "Load a package first.")
+            return
+        from aurora_method_builder.app import AuroraMethodBuilderWindow
+        window = AuroraMethodBuilderWindow()
+        window.editor.load_package(self.imported_package)
+        window.editor.loaded_package_path = self.imported_package_path
+        self._package_viewer = window
+        window.show()
+
     def load_aurora_package_file(self):
         if self.selected_run_mode() != "aurora_package":
             return
@@ -1441,6 +1472,10 @@ class main_window(QMainWindow):
         self.panels: list[graph_panel] = []
         self.expanded_panel: graph_panel | None = None
         self.active_runs: dict[graph_panel, int] = {}
+        self.run_started_at = {}
+        self.run_durations = {}
+        self.running_step_labels = {}
+        self.chamber_progress = {}
         self.stopping_panels: set[graph_panel] = set()
         self.next_run_id = 1
         self.run_panels: dict[int, graph_panel] = {}
@@ -1511,6 +1546,10 @@ class main_window(QMainWindow):
         self.export_bdf_action.setStatusTip("Export selected channel measurements as BDF files")
         self.export_bdf_action.triggered.connect(self.export_bdf)
         toolbar.addAction(self.export_bdf_action)
+        self.run_all_action = toolbar.addAction("Run all")
+        self.run_all_action.triggered.connect(self.run_all)
+        self.stop_all_action = toolbar.addAction("Stop all")
+        self.stop_all_action.triggered.connect(self.stop_all)
 
         toolbar_spacer = QWidget(toolbar)
         toolbar_spacer.setSizePolicy(
@@ -1526,8 +1565,21 @@ class main_window(QMainWindow):
         toolbar.addWidget(self.debug_device_checkbox)
 
         self.channel_status_label = QLabel("Select a channel to view its status", self)
+        self.channel_status_label.setWordWrap(True)
         self.channel_status_label.setObjectName("channelStatus")
+        self.statusBar().setMinimumHeight(48)
         self.statusBar().addPermanentWidget(self.channel_status_label, 1)
+        self.run_progress_bar = QProgressBar(self)
+        self.run_progress_bar.setMaximumWidth(150)
+        self.run_progress_bar.hide()
+        self.statusBar().addPermanentWidget(self.run_progress_bar)
+        self.chamber_status_label = QLabel(self)
+        self.chamber_status_label.setStyleSheet("color: #b42318;")
+        self.chamber_status_label.setWordWrap(True)
+        self.statusBar().addPermanentWidget(self.chamber_status_label, 1)
+        self.status_timer = QTimer(self)
+        self.status_timer.timeout.connect(self._show_selected_channel_status)
+        self.status_timer.start(1000)
 
         self.connection_indicator = connection_indicator()
         self.statusBar().addPermanentWidget(self.connection_indicator)
@@ -1556,6 +1608,54 @@ class main_window(QMainWindow):
         self.panel_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         self.panel_scroll_area.setWidget(self.panel_conainer)
         self.setCentralWidget(self.panel_scroll_area)
+
+    def run_all(self):
+        panels = [p for p in self.panels if p in self.saved_measurement_configurations
+                  and p not in self.active_runs and p.instrument is not None]
+        if not panels:
+            return
+        prepared = []
+        try:
+            for panel in panels:
+                configuration = self.saved_measurement_configurations[panel]
+                method = configuration.build_method()
+                settings = configuration.bdf_auto_save_settings
+                if settings is not None:
+                    settings.output_dir.mkdir(parents=True, exist_ok=True)
+                prepared.append((panel, method, configuration))
+        except Exception as exc:
+            QMessageBox.warning(self, "Cannot start batch", f"{panel.base_title}: {exc}")
+            return
+        if QMessageBox.question(self, "Run all", "Start configured channels: " +
+                                ", ".join(p.base_title for p in panels) + "?",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        requests = []
+        for panel, method, configuration in prepared:
+            requests.append(self.start_measurement(panel, method, configuration.method_label,
+                configuration.temperature_settings, configuration.bdf_auto_save_settings, defer_start=True))
+        self.connection_service.start_measurement_batch(requests)
+
+    def stop_all(self):
+        panels = list(self.active_runs)
+        if not panels:
+            return
+        if QMessageBox.question(self, "Stop all", "Stop all running channels?",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        for panel in panels:
+            self.stop_measurement(panel)
+
+    def _refresh_chamber_status(self):
+        groups = {}
+        for panel, progress in self.chamber_progress.items():
+            current = f"{progress.temperature_c:.1f}" if progress.temperature_c is not None else "—"
+            text = f"{html.escape(progress.message)} <b>[{current} °C / {progress.target_c:g} °C]</b>"
+            groups.setdefault(text, []).append(panel.base_title)
+        self.chamber_status_label.setText("<br>".join(
+            f"{', '.join(names)}: {text}" for text, names in groups.items()))
 
     def scan_devices(self):
         if self.device_state.is_connected or self.connection_service.is_running:
@@ -1888,7 +1988,7 @@ class main_window(QMainWindow):
         if panel is None:
             return
         self.channel_statuses[panel] = status
-        if panel is self.selected_panel and panel not in self.active_runs:
+        if panel is self.selected_panel:
             self._show_selected_channel_status()
 
     def _panel_for_instrument(self, instrument):
@@ -1899,11 +1999,31 @@ class main_window(QMainWindow):
 
     def _show_selected_channel_status(self):
         panel = self.selected_panel
+        self.run_progress_bar.hide()
         if panel is None:
             self.channel_status_label.setText("Select a channel to view its status")
             return
 
         status = self.channel_statuses.get(panel)
+        if panel in self.active_runs:
+            run_id = self.active_runs[panel]
+            elapsed = max(0, time.monotonic() - self.run_started_at.get(run_id, time.monotonic()))
+            duration = self.run_durations.get(run_id)
+            label = self.running_step_labels.get(run_id, self.run_method_labels.get(run_id, "Measurement"))
+            def clock_text(seconds):
+                seconds = int(seconds)
+                return f"{seconds // 3600}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+            parts = [panel.base_title, f"Running: {label}", f"Elapsed: {clock_text(elapsed)}"]
+            if duration:
+                parts[-1] += f" / ~{clock_text(duration)} · ~{clock_text(max(0, duration-elapsed))} left"
+                self.run_progress_bar.setValue(min(100, int(100 * elapsed / duration)))
+                self.run_progress_bar.show()
+            if status is not None:
+                parts.append(f"Potential: {status.potential_v:.3f} V")
+                if status.current_ua is not None:
+                    parts.append(f"Current: {status.current_ua:.3f} µA")
+            self.channel_status_label.setText(" | ".join(parts))
+            return
         if status is None:
             if getattr(panel.instrument, "interface", None) == "mock":
                 text = f"{panel.base_title} | Status unavailable for mock device"
@@ -1917,7 +2037,7 @@ class main_window(QMainWindow):
             status.device_state,
             f"Potential: {status.potential_v:.3f} V",
         ]
-        if status.current_ua is not None:
+        if status.current_ua is not None and panel in self.active_runs:
             parts.append(f"Current: {status.current_ua:.3f} µA")
         self.channel_status_label.setText(" | ".join(parts))
 
@@ -2131,6 +2251,7 @@ class main_window(QMainWindow):
         method_label: str,
         temperature_settings=None,
         bdf_auto_save_settings: BdfAutoSaveSettings | None = None,
+        defer_start: bool = False,
     ):
         run_id = self.next_run_id
         self.next_run_id += 1
@@ -2142,17 +2263,18 @@ class main_window(QMainWindow):
             self.run_bdf_auto_save_sequences[run_id] = set()
 
         self.active_runs[panel] = run_id
+        self.run_started_at[run_id] = time.monotonic()
+        # Only estimate bounded durations; EIS and condition-driven steps are unknown.
+        self.run_durations[run_id] = self._estimate_duration(method)
         panel.set_running(True)
         panel.set_status_text("Running")
         if panel is self.selected_panel:
             self.channel_status_label.setText(f"{panel.base_title} | Measurement running")
         self.statusBar().showMessage(f"Running {method_label} on {panel.base_title}...", 0)
-        self.connection_service.start_measurement(
-            run_id,
-            panel.instrument,
-            method,
-            temperature_settings,
-        )
+        request = (run_id, panel.instrument, method, temperature_settings)
+        if defer_start:
+            return request
+        self.connection_service.start_measurement(*request)
 
     def stop_measurement(self, panel: graph_panel):
         run_id = self.active_runs.get(panel)
@@ -2169,6 +2291,14 @@ class main_window(QMainWindow):
         if panel is None or panel not in self.panels:
             return
         if isinstance(callback_data, LiveMeasurementStarted):
+            if callback_data.segment is not None:
+                self.running_step_labels[run_id] = (callback_data.segment.step_type or callback_data.segment.label).replace("_", " ")
+                previous = self.channel_statuses.get(panel)
+                self.channel_statuses[panel] = channel_status_snapshot("Running",
+                    previous.potential_v if previous else float("nan"),
+                    0.0 if callback_data.segment.step_type in {"ocv", "open_circuit_voltage", "temperature"} else None)
+            self.chamber_progress.pop(panel, None)
+            self._refresh_chamber_status()
             panel.graph.begin_live_measurement(callback_data)
             return
         if isinstance(callback_data, AuroraStepCompleted):
@@ -2176,14 +2306,63 @@ class main_window(QMainWindow):
             self.auto_save_aurora_step_bdf(run_id, panel, callback_data.segment)
             return
         if isinstance(callback_data, TemperatureProgress):
-            panel.set_status_text(callback_data.message)
-            self.statusBar().showMessage(f"{panel.base_title}: {callback_data.message}", 0)
+            self.chamber_progress[panel] = callback_data
+            self._refresh_chamber_status()
             return
         panel.graph.plot_live_data(callback_data)
+        self._update_live_channel_readings(panel, callback_data)
+
+    @staticmethod
+    def _estimate_duration(method):
+        if not hasattr(method, "protocol_json"):
+            duration = getattr(method, "run_time", None)
+            return duration + getattr(method, "equilibration_time", 0) if duration else None
+        from aurora_method_builder.methods import _expanded_protocol_steps
+        import aurora_unicycler
+        protocol = aurora_unicycler.CyclingProtocol.from_dict(method.protocol_json)
+        duration = 0.0
+        for _, _, step in _expanded_protocol_steps(protocol, method.max_executed_steps):
+            if isinstance(step, (aurora_unicycler.OpenCircuitVoltage, aurora_unicycler.ConstantCurrent, aurora_unicycler.ConstantVoltage)) and step.until_time_s and not any(
+                getattr(step, field, None) is not None for field in ("until_voltage_V", "until_rate_C", "until_current_mA")
+            ):
+                duration += step.until_time_s
+            else:
+                return None
+        return duration or None
+
+    def _update_live_channel_readings(self, panel, callback_data):
+        from src.measurement_data import _canonical_array_name, dataset_arrays
+        arrays = [getattr(callback_data, name, None) for name in ("x_array", "y_array")]
+        data = getattr(callback_data, "data", None)
+        if data is not None:
+            arrays.extend(dataset_arrays(data))
+        previous = self.channel_statuses.get(panel)
+        potential = previous.potential_v if previous else float("nan")
+        current = previous.current_ua if previous else None
+        factors = {"V": 1., "mV": 1e-3, "A": 1e6, "mA": 1e3, "uA": 1., "µA": 1., "nA": 1e-3}
+        for array in arrays:
+            if array is None:
+                continue
+            name = _canonical_array_name(str(array.name), str(getattr(array, "type", "")), str(getattr(array, "quantity", "")))
+            if name not in {"Potential", "Current"} or array.unit not in factors:
+                continue
+            # SDK arrays support indexing; avoid copying a multi-day array for one reading.
+            try:
+                value = float(array[-1])
+            except (TypeError, IndexError, AttributeError):
+                values = array.to_numpy()
+                if not len(values):
+                    continue
+                value = float(values[-1])
+            if name == "Potential":
+                potential = value * factors[array.unit]
+            else:
+                current = value * factors[array.unit]
+        self.channel_statuses[panel] = channel_status_snapshot("Running", potential, current)
 
     def auto_save_aurora_step_bdf(self, run_id, panel: graph_panel, segment):
         settings = self.run_bdf_auto_save_settings.get(run_id)
-        if settings is None:
+        if settings is None or not settings.after_each_step:
             return
 
         try:
@@ -2242,6 +2421,16 @@ class main_window(QMainWindow):
         if panel is None:
             return
         method_label = self.run_method_labels.get(run_id, "Measurement")
+        settings = self.run_bdf_auto_save_settings.get(run_id)
+        if settings is not None and settings.combined_file:
+            try:
+                stem = settings.custom_base_name if settings.custom_naming_enabled else self._bdf_export_stem(
+                    settings.cell_name, settings.cas_id, self._next_bdf_sequence_number(
+                        settings.output_dir, settings.cell_name, settings.cas_id, settings.export_type, set()))
+                export_measurement_to_bdf_files(measurement, settings.output_dir, stem + "_all",
+                                               settings.export_type, settings.optional_quantity_keys)
+            except Exception as exc:
+                self._report_bdf_auto_save_failure(run_id, panel, str(exc))
         self.on_measurement_finished(panel, method_label, measurement)
         self.cleanup_run(panel, run_id)
 
@@ -2283,6 +2472,11 @@ class main_window(QMainWindow):
         )
 
     def cleanup_run(self, panel: graph_panel, run_id: int):
+        self.run_started_at.pop(run_id, None)
+        self.run_durations.pop(run_id, None)
+        self.running_step_labels.pop(run_id, None)
+        self.chamber_progress.pop(panel, None)
+        self._refresh_chamber_status()
         if self.active_runs.get(panel) == run_id:
             self.active_runs.pop(panel, None)
         self.run_panels.pop(run_id, None)

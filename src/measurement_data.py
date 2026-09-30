@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 import math
 import re
 from typing import Any
+from functools import cached_property
+from datetime import datetime
 
 import numpy as np
 
@@ -53,6 +55,7 @@ class LiveMeasurementStarted:
 class LogicalMeasurementRun:
     title: str
     segments: list[MeasurementSegment] = field(default_factory=list)
+    started_at: datetime = field(default_factory=datetime.now)
 
     def add_segment(self, segment: MeasurementSegment):
         self.segments.append(segment)
@@ -71,6 +74,10 @@ class UnifiedDataArray:
     quantity: str = ""
 
     def to_numpy(self):
+        return self._numpy_values
+
+    @cached_property
+    def _numpy_values(self):
         return np.asarray(self.values)
 
 
@@ -142,16 +149,32 @@ def measurement_arrays(measurement) -> list[Any]:
 def dataset_arrays(dataset) -> list[Any]:
     arrays = getattr(dataset, "arrays", None)
     if callable(arrays):
-        return list(arrays())
+        return _with_ce_potential(list(arrays()))
 
     values = getattr(dataset, "values", None)
     if callable(values):
-        return list(values())
+        return _with_ce_potential(list(values()))
 
     try:
         return [dataset[key] for key in dataset]
     except TypeError:
         return []
+
+
+def _with_ce_potential(arrays):
+    if any(getattr(a, "name", "") == "CEPotential" for a in arrays):
+        return arrays
+    by_name = {_canonical_array_name(getattr(a, "name", ""), str(getattr(a, "type", "")),
+                                    str(getattr(a, "quantity", ""))): a for a in arrays}
+    full, normal = by_name.get("PotentialWEvsCE"), by_name.get("Potential")
+    if full is not None and normal is not None:
+        factors = {"V": 1.0, "mV": 1e-3, "uV": 1e-6, "µV": 1e-6}
+        if full.unit in factors and normal.unit in factors:
+            f, n = np.asarray(full.to_numpy()), np.asarray(normal.to_numpy())
+            if f.shape == n.shape:
+                arrays.append(UnifiedDataArray("CEPotential", "V", n * factors[full.unit] - f * factors[normal.unit],
+                                               type="CEPotential", quantity="ce_potential")) # E_we - E_cell
+    return arrays
 
 
 def default_axis_indexes(arrays: list[Any]) -> tuple[int, int]:
@@ -318,6 +341,7 @@ def _unify_segment_datasets(
     step_ids: list[Any] = []
     execution_indexes: list[int] = []
     step_types: list[str] = []
+    step_times: list[float] = []
     total_length = 0
 
     for segment, dataset in sources:
@@ -336,9 +360,12 @@ def _unify_segment_datasets(
             step_ids.append(math.nan)
             execution_indexes.append(math.nan)
             step_types.append("")
+            step_times.append(math.nan)
             total_length += 1
 
         source_values: dict[tuple[str, str, str, str], list[Any]] = {}
+        elapsed = _measurement_elapsed_values(arrays, row_count)
+        step_times.extend(elapsed if elapsed is not None else [math.nan] * row_count)
         source_priorities: dict[tuple[str, str, str, str], int] = {}
         for array_index, data_array in enumerate(arrays):
             key = _data_array_identity(data_array, array_index)
@@ -389,6 +416,7 @@ def _unify_segment_datasets(
     ]
     arrays.extend(
         [
+            UnifiedDataArray("StepTime", "s", tuple(step_times), type="StepTime", quantity="step_time"),
             UnifiedDataArray("segment_index", "", tuple(segment_indexes), type="Count", quantity="segment_index"),
             UnifiedDataArray("step_id", "", tuple(step_ids), type="Count", quantity="step_id"),
             UnifiedDataArray("execution_index", "", tuple(execution_indexes), type="Count", quantity="execution_index"),
@@ -547,7 +575,7 @@ def _canonical_array_name(name: str, array_type: str, quantity: str) -> str | No
 
     if normalized.intersection({"time", "testtime", "elapsedtime"}):
         return "Time"
-    if normalized.intersection({"potentialwevsce", "wevscepotential"}):
+    if normalized.intersection({"potentialwevsce", "wevscepotential", "cellpotential"}):
         return "PotentialWEvsCE"
     if normalized.intersection({"potential", "appliedpotential", "voltage", "appliedvoltage"}):
         return "Potential"
@@ -555,9 +583,9 @@ def _canonical_array_name(name: str, array_type: str, quantity: str) -> str | No
         return "Current"
     if normalized.intersection({"frequency", "freq"}):
         return "Frequency"
-    if normalized.intersection({"zreal", "realimpedance"}):
+    if normalized.intersection({"zre", "zreal", "realimpedance", "z'"}):
         return "ZReal"
-    if normalized.intersection({"zimag", "imaginaryimpedance"}):
+    if normalized.intersection({"zim", "zimag", "imaginaryimpedance", "z''"}):
         return "ZImag"
     if normalized.intersection({"phase", "phaseangle"}):
         return "Phase"
@@ -601,4 +629,6 @@ def _find_array_index(arrays: list[Any], type_names: tuple[str, ...], text_names
 def _normalize_text(value) -> str:
     if value is None:
         return ""
-    return "".join(character for character in str(value).casefold() if character.isalnum())
+    # Preserve impedance primes: Z, Z' and Z'' are different quantities.
+    text = str(value).casefold().replace("`", "'").replace("′", "'").replace("″", "''")
+    return "".join(character for character in text if character.isalnum() or character == "'")

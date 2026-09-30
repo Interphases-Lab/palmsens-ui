@@ -1,3 +1,5 @@
+STATUS_BAR_FONT_SIZE_PX = 12
+
 APP_STYLESHEET = """
 QMainWindow {
     background: #f4f6f8;
@@ -228,7 +230,13 @@ QListView::item:hover {
 }
 
 QStatusBar {
+    font-size: __STATUS_FONT_SIZE__px;
     background: #ffffff;
     border-top: 1px solid #d8dee6;
 }
+QStatusBar QLabel { font-size: __STATUS_FONT_SIZE__px; }
+QMenu { background: white; color: #1f2a36; border: 1px solid #c7d0da; padding: 5px; }
+QMenu::item { padding: 6px 20px; color: #1f2a36; }
+QMenu::item:selected { background: #edf3f8; }
 """
+APP_STYLESHEET = APP_STYLESHEET.replace("__STATUS_FONT_SIZE__", str(STATUS_BAR_FONT_SIZE_PX))

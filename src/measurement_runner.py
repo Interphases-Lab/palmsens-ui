@@ -92,7 +92,11 @@ class measurement_runner(QObject):
 
             temperature_controller = self._connect_temperature_controller()
             try:
-                self.progress.emit(LiveMeasurementStarted())
+                self.progress.emit(LiveMeasurementStarted(
+                    run_title=type(self.method).__name__,
+                    segment=MeasurementSegment(1, type(self.method).__name__, None,
+                        step_type="ocv" if isinstance(self.method, ps.OpenCircuitPotentiometry) else type(self.method).__name__),
+                ))
                 measurement, temperature_samples = await self._measure_palmsens(
                     manager,
                     self.method,
@@ -103,15 +107,13 @@ class measurement_runner(QObject):
                 if temperature_controller is not None:
                     temperature_controller.close()
 
-            if temperature_controller is None:
-                return measurement
-
             title = getattr(measurement, "title", None) or type(self.method).__name__
             segment = MeasurementSegment(
                 index=1,
                 label=title,
                 source=measurement,
                 temperature_samples=temperature_samples,
+                step_type="ocv" if isinstance(self.method, ps.OpenCircuitPotentiometry) else type(self.method).__name__,
             )
             return LogicalMeasurementRun(title, [segment])
         finally:
@@ -324,10 +326,19 @@ class measurement_runner(QObject):
             if action.wait_starts_immediately
             else _TARGET_REACHED_OCV_LIMIT_S
         )
-        return ps.OpenCircuitPotentiometry(
-            interval_time=interval_s,
-            run_time=run_time_s,
-        )
+        # Use the same compiler as package OCV so extra voltage measurements
+        # (including WE vs CE) and safety limits are preserved.
+        import aurora_unicycler
+        from aurora_method_builder.methods import build_aurora_methodscript
+
+        protocol_data = dict(stepwise_method.protocol_json)
+        protocol_data["method"] = [{"step": "open_circuit_voltage", "until_time_s": run_time_s}]
+        protocol_data["record"] = {**record, "time_s": interval_s}
+        protocol = aurora_unicycler.CyclingProtocol.from_dict(protocol_data)
+        settings = replace(stepwise_method.settings, additional_measurements=tuple(
+            dict.fromkeys((*stepwise_method.settings.additional_measurements, "ag"))
+        ))
+        return ps.MethodScript(script=build_aurora_methodscript(protocol, settings))
 
     async def _execute_temperature_action(
         self,

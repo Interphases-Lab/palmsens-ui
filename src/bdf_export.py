@@ -179,7 +179,9 @@ def _term(
 def _normalize_text(value) -> str:
     if value is None:
         return ""
-    return re.sub(r"[^a-z0-9]+", "", str(value).casefold())
+    # Primes distinguish Z, Z' and Z''; stripping them aliases all three.
+    text = str(value).casefold().replace("`", "'").replace("′", "'").replace("″", "''")
+    return re.sub(r"[^a-z0-9']+", "", text)
 
 
 _BDF_TERMS = (
@@ -303,6 +305,14 @@ def export_measurement_to_bdf_files(
 
     for dataset_view in dataset_views:
         groups = _measurement_groups(dataset_view.dataset)
+        method = getattr(dataset_view.source, "method", None)
+        if callable(getattr(method, "to_settings", None)):
+            method = method.to_settings()
+        for group in groups:
+            group["open_circuit"] = (
+                type(method).__name__ == "OpenCircuitPotentiometry"
+                or getattr(method, "id", None) == "ocp"
+            )
         for group in groups:
             try:
                 series = _extract_bdf_series(group, optional_quantity_keys)
@@ -387,7 +397,7 @@ def _extract_bdf_series(group, optional_quantity_keys: set[str] | None = None) -
     if is_eis and optional_quantity_keys is not None:
         optional_quantity_keys = set(optional_quantity_keys) - _EIS_EXCLUDED_BDF_KEYS
     elif is_eis:
-        optional_quantity_keys = set()
+        optional_quantity_keys = set(_BDF_TERMS_BY_KEY) - _EIS_EXCLUDED_BDF_KEYS
 
     for entry in group["arrays"]:
         data_array = entry["array"]
@@ -407,7 +417,11 @@ def _extract_bdf_series(group, optional_quantity_keys: set[str] | None = None) -
 
         text_values = (base_key, array_name, array_type, quantity)
         series[column_key] = _convert_values(column_key, unit, values, text_values)
+        # PalmSens supplies -Im(Z) and -phase; BDF uses signed Im(Z) and phase.
+        if column_key in {"imaginary_impedance_ohm", "phase_degree"}:
+            series[column_key] = [-value for value in series[column_key]]
 
+    _add_open_circuit_current(series, group)
     missing_columns = [column_key for column_key in _REQUIRED_BDF_KEYS if column_key not in series]
     if missing_columns:
         _add_open_circuit_current(series, group)
@@ -418,6 +432,10 @@ def _extract_bdf_series(group, optional_quantity_keys: set[str] | None = None) -
             "Missing required BDF quantities. The measurement must include time, voltage, and current arrays."
         )
 
+    if "step_time_second" not in series and "test_time_second" in series:
+        times = series["test_time_second"]
+        if times:
+            series["step_time_second"] = [value - times[0] for value in times]
     _ensure_matching_lengths(series)
     _derive_bdf_series(series, optional_quantity_keys)
     series = _filter_bdf_series(series, optional_quantity_keys)
@@ -428,6 +446,13 @@ def _extract_bdf_series(group, optional_quantity_keys: set[str] | None = None) -
 
 def _add_open_circuit_current(series: dict[str, list], group):
     if "current_ampere" in series:
+        for entry in group["arrays"]:
+            array = entry["array"]
+            if _normalize_text(getattr(array, "name", "")) == "steptype":
+                for index, step_type in enumerate(array.to_numpy()):
+                    if index < len(series["current_ampere"]) and _is_open_circuit_step_type(step_type):
+                        if not math.isfinite(series["current_ampere"][index]):
+                            series["current_ampere"][index] = 0.0
         return
     if "test_time_second" not in series or "voltage_volt" not in series:
         return
@@ -438,6 +463,8 @@ def _add_open_circuit_current(series: dict[str, list], group):
 
 
 def _is_open_circuit_group(group) -> bool:
+    if group.get("open_circuit"):
+        return True
     for entry in group["arrays"]:
         data_array = entry["array"]
         base_key = entry["base_key"]
@@ -449,7 +476,7 @@ def _is_open_circuit_group(group) -> bool:
             continue
 
         values = data_array.to_numpy()
-        if any(_is_open_circuit_step_type(value) for value in values):
+        if len(values) and all(_is_open_circuit_step_type(value) for value in values):
             return True
 
     return False
@@ -485,6 +512,7 @@ def _raw_dependency_keys(optional_quantity_keys: set[str] | None) -> set[str]:
         return set(_BDF_TERMS_BY_KEY)
 
     keys = set(_REQUIRED_BDF_KEYS)
+    keys.add("step_time_second")
     keys.update(optional_quantity_keys)
 
     if optional_quantity_keys.intersection({"absolute_impedance_ohm", "phase_degree"}):
@@ -507,6 +535,7 @@ def _filter_bdf_series(series: dict[str, list], optional_quantity_keys: set[str]
         return series
 
     allowed_keys = set(_REQUIRED_BDF_KEYS)
+    allowed_keys.add("step_time_second")
     allowed_keys.update(optional_quantity_keys)
     return {column_key: values for column_key, values in series.items() if column_key in allowed_keys}
 
@@ -765,6 +794,15 @@ def _detect_bdf_column(base_key: str, array_name: str, array_type: str, quantity
     )
     unit_key = _normalize_unit(unit)
     raw_unit = str(unit).strip()
+
+    # This is another voltage array, so identify it before generic aliases such
+    # as "potential" or the voltage-unit fallback can claim it.
+    if any(identifier in text for text in texts for identifier in _WEVSCE_IDENTIFIERS):
+        return "voltage_wevsce_volt"
+    if "cellpotential" in texts:
+        return "voltage_wevsce_volt"
+    if "cepotential" in texts:
+        return None
 
     for text in texts:
         column_key = _BDF_ALIAS_TO_KEY.get(text)
