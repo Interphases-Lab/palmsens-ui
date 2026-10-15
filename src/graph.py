@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import datetime
 
 from PySide6.QtWidgets import (
     QWidget,
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QToolButton,
 )
-from PySide6.QtCore import Signal, Qt, QSize
+from PySide6.QtCore import QTimer, Signal, Qt, QSize
 from PySide6.QtGui import QAction
 import pyqtgraph as pg
 import numpy as np
@@ -29,6 +30,7 @@ from src.measurement_data import (
     default_axis_indexes,
     measurement_arrays,
     measurement_dataset_views,
+    UnifiedDataArray,
 )
 from src.widgets import NoScrollComboBox
 
@@ -56,7 +58,23 @@ class _LiveMeasurement:
         self.dataset = dataset
 
 
+class TimeAxis(pg.AxisItem):
+    """Keep coordinates in seconds, format long time spans in minutes/hours."""
+    def tickStrings(self, values, scale, spacing):
+        if self.labelUnits == "s":
+            extent = max(abs(value) for value in self.range)
+            divisor, unit = (3600, "h") if extent >= 18000 else (60, "min") if extent >= 600 else (1, "s")
+            self.label.setHtml(f"{self.labelText} ({unit})")
+            return [f"{value / divisor:g}" for value in values]
+        return super().tickStrings(values, scale, spacing)
+
+
 class graph_widget(QWidget):
+    dataset_views_changed = Signal()
+
+    LIVE_PLOT_INTERVAL_S = 10
+    MAX_HISTORY_RUNS = 5
+    EXPANDED_LIVE_PLOT_INTERVAL_S = 5
     HOVER_LABEL_OFFSET = 12
     HOVER_LABEL_MARGIN = 4
     HOVER_MARKER_SIZE = 10
@@ -68,29 +86,53 @@ class graph_widget(QWidget):
         "#dc2626",
         "#0891b2",
     )
+    STEP_TYPE_COLORS = {
+        "discharge": "#2f6f9f",
+        "charge": "#dc2626",
+        "ocv": "#059669",
+        "constant_voltage": "#7c3aed",
+        "temperature": "#059669",
+        "voltage_scan": "#d97706",
+        "voltage scan": "#d97706",
+    }
 
     def __init__(self):
         super().__init__()
         self.setObjectName("graphWidget")
         self.measurement = None
+        self.history_views = []
+        self._history_runs = []
+        self._history_serial = 0
+        self.step_time_mode = False
+        self._completed_view_cache = None
+        self._measurement_view_cache = None
         self.x_index = None
         self.y_index = None
+        self.right_y_index = None
         self.dataset_view_id = None
+        self.nyquist_mode = False
+        self.align_axes = False
+        self.auto_range_enabled = True
         self.live_dataset_views = []
         self.live_arrays = {}
         self.live_axis_selection = None
         self.live_run: LogicalMeasurementRun | None = None
         self.live_active_segment: MeasurementSegment | None = None
         self.live_current_view: DatasetView | None = None
+        self.live_plot_dirty = False
+        self.live_plot_expanded = False
+        self.legend_visible = False
         self.live_curve = None
         self.primary_curves = []
         self.right_view = None
         self.right_curve = None
-        self.snap_hover_to_data = False
+        self.snap_hover_to_data = True
+        self.live_plot_timer = QTimer(self)
+        self.live_plot_timer.timeout.connect(self._update_live_plot)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.plot_widget = pg.PlotWidget()
+        self.plot_widget = pg.PlotWidget(axisItems={"bottom": TimeAxis(orientation="bottom")})
         self.plot_widget.setBackground("w")
         self.plot_widget.showGrid(x=True, y=True, alpha=0.25)
         self.plot_widget.getAxis("bottom").setPen("#7b8794")
@@ -98,6 +140,7 @@ class graph_widget(QWidget):
         self.plot_widget.getAxis("bottom").setTextPen("#56616f")
         self.plot_widget.getAxis("left").setTextPen("#56616f")
         self.plot_item = self.plot_widget.getPlotItem()
+        self._nyquist_hover = []
         self.legend = self.plot_item.addLegend(
             offset=(-10, 10),
             brush=pg.mkBrush(255, 255, 255, 225),
@@ -112,6 +155,16 @@ class graph_widget(QWidget):
     def set_rectangle_zoom_enabled(self, enabled: bool):
         mouse_mode = pg.ViewBox.RectMode if enabled else pg.ViewBox.PanMode
         self.plot_item.vb.setMouseMode(mouse_mode)
+
+    def set_auto_range(self, enabled: bool):
+        self.auto_range_enabled = enabled
+        if enabled:
+            self.plot_item.vb.autoRange()
+            if self.right_view is not None and self.right_curve is not None:
+                self.right_view.autoRange()
+        self.plot_item.vb.enableAutoRange(enable=enabled)
+        if self.right_view is not None:
+            self.right_view.enableAutoRange(enable=enabled)
 
     def _setup_hover_coordinates(self):
         self.hover_marker = pg.ScatterPlotItem(
@@ -129,7 +182,8 @@ class graph_widget(QWidget):
         self.plot_item.scene().sigMouseMoved.connect(self._update_hover_coordinates)
 
     def _add_hover_marker(self):
-        self.plot_item.addItem(self.hover_marker, ignoreBounds=True)
+        if self.hover_marker not in self.plot_item.items:
+            self.plot_item.addItem(self.hover_marker, ignoreBounds=True)
 
     def _update_hover_coordinates(self, scene_position):
         plot_bounds = self.plot_item.vb.sceneBoundingRect()
@@ -137,23 +191,66 @@ class graph_widget(QWidget):
             self._hide_hover_coordinates()
             return
 
-        cursor_coordinates = self.plot_item.vb.mapSceneToView(scene_position)
-        coordinates = (cursor_coordinates.x(), cursor_coordinates.y())
         if self.snap_hover_to_data:
-            coordinates = self._nearest_visible_data_point(*coordinates)
-            if coordinates is None:
+            nearest = self._nearest_visible_data_point(scene_position)
+            if nearest is None:
                 self._hide_hover_coordinates()
                 return
-            self.hover_marker.setData([coordinates[0]], [coordinates[1]])
+            curve, x_value, y_value = nearest
+            # Refine a downsampled display point back to a recorded sample.
+            raw_x, raw_y = curve.getOriginalDataset()
+            raw_index = None
+            if raw_x is not None and len(raw_x):
+                if curve.opts.get("clipToView"):
+                    radius = abs(self.plot_item.vb.viewRange()[0][1] - self.plot_item.vb.viewRange()[0][0]) / max(1, self.plot_widget.width())
+                    lo = max(0, int(np.searchsorted(raw_x, x_value-radius)) - 1)
+                    hi = min(len(raw_x), int(np.searchsorted(raw_x, x_value+radius)) + 1)
+                    indexes = np.arange(lo, hi)
+                else:
+                    indexes = np.flatnonzero(np.isfinite(raw_x) & np.isfinite(raw_y))
+                if len(indexes):
+                    y_range = (self.right_view if curve is self.right_curve else self.plot_item.vb).viewRange()[1]
+                    x_range = self.plot_item.vb.viewRange()[0]
+                    distance = ((raw_x[indexes]-x_value) / (abs(x_range[1]-x_range[0]) or 1))**2 + ((raw_y[indexes]-y_value) / (abs(y_range[1]-y_range[0]) or 1))**2
+                    distance[~np.isfinite(distance)] = np.inf
+                    raw_index = int(indexes[np.argmin(distance)])
+                    x_value, y_value = float(raw_x[raw_index]), float(raw_y[raw_index])
+            self.hover_marker.setData([x_value], [y_value])
+            self._attach_hover_marker_to_curve(curve)
             self.hover_marker.show()
+            coordinates = (x_value, y_value)
         else:
+            self._attach_hover_marker_to_curve(self.primary_curves[0])
+            cursor_coordinates = self.plot_item.vb.mapSceneToView(scene_position)
+            coordinates = (cursor_coordinates.x(), cursor_coordinates.y())
             self.hover_marker.hide()
 
         x_value, y_value = coordinates
-        self.hover_label.setText(
-            f"x: {x_value:.6g}\n"
-            f"y: {y_value:.6g}"
-        )
+        text = f"x: {x_value:.6g}<br>y: {y_value:.6g}"
+        if self.right_curve is not None:
+            lines = [f"x: {x_value:.6g}"]
+            for name, item in (("y1", self.primary_curves[0]), ("y2", self.right_curve)):
+                xs, ys = item.getOriginalDataset()
+                if xs is not None and len(xs):
+                    if self.snap_hover_to_data and raw_index is not None and raw_index < len(xs):
+                        index = raw_index
+                        color = item.opts["pen"].color().name()
+                        lines.append(f'<span style="color:{color}">{name}: {ys[index]:.6g}</span>')
+                        continue
+                    finite = np.isfinite(xs) & np.isfinite(ys)
+                    if finite.any():
+                        index = np.argmin(np.where(finite, np.abs(xs - x_value), np.inf))
+                        color = item.opts["pen"].color().name()
+                        lines.append(f'<span style="color:{color}">{name}: {ys[index]:.6g}</span>')
+            text = "<br>".join(lines)
+        elif self.nyquist_mode and self.snap_hover_to_data:
+            index = self.primary_curves.index(curve)
+            if index < len(self._nyquist_hover):
+                xs, ys, fs = self._nyquist_hover[index]
+                if fs is not None and len(xs) == len(fs):
+                    point = np.argmin((xs-x_value)**2 + (ys-y_value)**2)
+                    text += f"<br>f: {fs[point]:.6g} Hz"
+        self.hover_label.setText(text)
         self.hover_label.adjustSize()
 
         cursor_position = self.plot_widget.mapFromScene(scene_position)
@@ -171,17 +268,25 @@ class graph_widget(QWidget):
         )
         self.hover_label.show()
 
-    def _nearest_visible_data_point(self, cursor_x, cursor_y):
-        x_range, y_range = self.plot_item.vb.viewRange()
-        x_span = abs(x_range[1] - x_range[0]) or 1
-        y_span = abs(y_range[1] - y_range[0]) or 1
-        plot_bounds = self.plot_item.vb.sceneBoundingRect()
-        nearest = None
+    def _nearest_visible_data_point(self, scene_position):
+        curves = list(self.primary_curves)
+        if self.right_curve is not None:
+            curves.append(self.right_curve)
 
-        for curve in self.primary_curves:
+        nearest = None
+        for curve in curves:
             x_data, y_data = curve.getData()
             if x_data is None or y_data is None:
                 continue
+
+            view_box = self.right_view if curve is self.right_curve and self.right_view is not None else self.plot_item.vb
+            view_range = view_box.viewRange()
+            x_range, y_range = view_range
+            x_span = abs(x_range[1] - x_range[0]) or 1
+            y_span = abs(y_range[1] - y_range[0]) or 1
+            plot_bounds = view_box.sceneBoundingRect()
+            cursor_coordinates = view_box.mapSceneToView(scene_position)
+            cursor_x, cursor_y = cursor_coordinates.x(), cursor_coordinates.y()
 
             x_data = np.asarray(x_data)
             y_data = np.asarray(y_data)
@@ -203,6 +308,7 @@ class graph_widget(QWidget):
             local_index = int(np.argmin(distances))
             candidate = (
                 float(distances[local_index]),
+                curve,
                 float(x_data[visible_indexes[local_index]]),
                 float(y_data[visible_indexes[local_index]]),
             )
@@ -211,9 +317,28 @@ class graph_widget(QWidget):
 
         return None if nearest is None else nearest[1:]
 
+    def _attach_hover_marker_to_curve(self, curve):
+        target_view = self.right_view if curve is self.right_curve and self.right_view is not None else self.plot_item
+        if target_view is self.plot_item:
+            if self.right_view is not None and self.hover_marker in self.right_view.addedItems:
+                self.right_view.removeItem(self.hover_marker)
+            self._add_hover_marker()
+        elif self.right_view is not None:
+            self.plot_item.removeItem(self.hover_marker)
+            self.right_view.addItem(self.hover_marker, ignoreBounds=True)
+
     def set_snap_hover_to_data(self, enabled):
         self.snap_hover_to_data = enabled
         self._hide_hover_coordinates()
+
+    def set_align_axes(self, enabled: bool):
+        self.align_axes = enabled
+        if self.right_view is None:
+            return
+        if enabled:
+            self.right_view.setYLink(self.plot_item.vb)
+        else:
+            self.right_view.setYLink(None)
 
     def _hide_hover_coordinates(self):
         self.hover_label.hide()
@@ -224,13 +349,33 @@ class graph_widget(QWidget):
         super().leaveEvent(event)
 
     def plot_measurement(self, measurement, selection=None):
+        self._measurement_view_cache = None
         self.measurement = measurement
+        self.live_plot_timer.stop()
         self._clear_live_state()
+        self.dataset_views_changed.emit()
+        if self.nyquist_mode and self.plot_nyquist():
+            return
         dataset_view = self._dataset_view_for_selection(measurement, selection)
         self._plot_dataset_view(dataset_view, selection)
 
     def begin_live_measurement(self, event: LiveMeasurementStarted | None = None):
         event = event or LiveMeasurementStarted()
+        if self.measurement is not None:
+            stamp = getattr(self.measurement, "started_at", datetime.now()).strftime("%Y-%m-%d %H:%M")
+            archived = []
+            self._history_serial += 1
+            for view in self.available_dataset_views():
+                if view.id in {"measurement", "eis"}:
+                    archived.append(replace(view, id=f"history_{self._history_serial}_{view.id}",
+                        title=f"{view.title} · {stamp}"))
+            if archived:
+                self._history_runs.append(archived)
+                self._history_runs = self._history_runs[-self.MAX_HISTORY_RUNS:]
+                self.history_views = [view for run in self._history_runs for view in run]
+        self.measurement = None
+        self.live_plot_timer.setInterval(self._live_plot_interval_ms())
+        self.live_plot_timer.start()
         if event.segment is None:
             self._clear_live_state()
             self.dataset_view_id = None
@@ -242,29 +387,60 @@ class graph_widget(QWidget):
             self.live_active_segment = event.segment
             self.live_arrays = {}
             self.live_current_view = None
+            self.live_plot_dirty = False
             self._refresh_live_dataset_views()
 
-        self.measurement = None
+    def set_live_plot_expanded(self, expanded: bool):
+        self.live_plot_expanded = expanded
+        if self.live_plot_timer.isActive():
+            self.live_plot_timer.setInterval(self._live_plot_interval_ms())
+
+    def _live_plot_interval_ms(self):
+        interval_s = (
+            self.EXPANDED_LIVE_PLOT_INTERVAL_S
+            if self.live_plot_expanded
+            else self.LIVE_PLOT_INTERVAL_S
+        )
+        return interval_s * 1000
+
+    def _update_live_plot(self):
+        if not self.live_plot_dirty:
+            return
+        self.live_plot_dirty = False
+        self._refresh_live_dataset_views()
+        self._plot_selected_live_view()
 
     def complete_live_segment(self, segment: MeasurementSegment):
         if self.live_run is None:
             return
 
         self.live_run.add_segment(segment)
+        self._completed_view_cache = None
         self.live_active_segment = None
+        self.live_current_view = None
+        self.live_plot_dirty = False
         self._refresh_live_dataset_views()
         self._plot_selected_live_view()
 
     def _clear_live_state(self):
+        self._completed_view_cache = None
         self.live_dataset_views = []
         self.live_arrays = {}
         self.live_axis_selection = None
         self.live_run = None
         self.live_active_segment = None
         self.live_current_view = None
+        self.live_plot_dirty = False
 
     def _plot_dataset_view(self, dataset_view, selection=None):
+        self.plot_item.vb.setAspectLocked(False)
         arrays = dataset_arrays(dataset_view.dataset) if dataset_view is not None else []
+        # Plot base SI units so the axis can choose mV, µA, kOhm, etc.
+        conversions = {"mV": (1e-3, "V"), "uV": (1e-6, "V"), "µV": (1e-6, "V"),
+                       "mA": (1e-3, "A"), "uA": (1e-6, "A"), "µA": (1e-6, "A"), "nA": (1e-9, "A")}
+        arrays = [UnifiedDataArray(a.name, conversions[a.unit][1], a.to_numpy() * conversions[a.unit][0],
+                                   str(getattr(a, "type", "")), str(getattr(a, "quantity", "")))
+                  if a.unit in conversions else a for a in arrays]
 
         if not arrays:
             self._prepare_plot()
@@ -276,11 +452,19 @@ class graph_widget(QWidget):
         if selection:
             self.x_index = selection["x"]
             self.y_index = selection["left_y"]
-            if selection["right_y"] is not None:
-                self._plot_dual_arrays_from_indexes(arrays, self.x_index, self.y_index, selection["right_y"])
-                return
+            self.right_y_index = selection["right_y"]
         else:
             self.x_index, self.y_index = default_axis_indexes(arrays)
+            self.right_y_index = None
+
+        if self.step_time_mode and self.x_index < len(arrays):
+            name = str(arrays[self.x_index].name).casefold()
+            if name in {"time", "steptime"}:
+                self.x_index = next((i for i, a in enumerate(arrays) if a.name == "StepTime"), self.x_index)
+
+        if self.right_y_index is not None:
+            self._plot_dual_arrays_from_indexes(arrays, self.x_index, self.y_index, self.right_y_index)
+            return
 
         if self.x_index >= len(arrays):
             self.x_index = 0
@@ -289,6 +473,15 @@ class graph_widget(QWidget):
 
         x_array = arrays[self.x_index]
         y_array = arrays[self.y_index]
+        if not dataset_view.is_eis:
+            series = self._split_step_series(arrays, self.x_index, self.y_index)
+            if series:
+                self._plot_labeled_series(
+                    series,
+                    f"{x_array.name}, {x_array.unit}",
+                    f"{y_array.name}, {y_array.unit}",
+                )
+                return
         if dataset_view is not None and dataset_view.id == "eis":
             series = self._split_eis_series(arrays, self.x_index, self.y_index)
             if len(series) > 1:
@@ -305,10 +498,87 @@ class graph_widget(QWidget):
                           )
 
     @staticmethod
+    def _abbreviate_step_name(value):
+        text = str(value or "step").strip()
+        cleaned = "".join(character if character.isalnum() else "_" for character in text)
+        parts = [part for part in cleaned.split("_") if part]
+        if not parts:
+            return "STEP"
+        abbreviated = "".join(part[0].upper() for part in parts)
+        if abbreviated == "IS":
+            return "EIS"
+        return abbreviated
+
+    @staticmethod
+    def _split_step_series(arrays, x_index, y_index):
+        metadata = {
+            str(_get_name(array, "")): np.asarray(array.to_numpy()).ravel()
+            for array in arrays
+            if _is_metadata_array_name(_get_name(array, ""))
+        }
+        segment_indexes = metadata.get("segment_index")
+        if segment_indexes is None:
+            segment_indexes = np.ones(len(arrays[x_index].to_numpy()))
+
+        x_values = np.asarray(arrays[x_index].to_numpy()).ravel()
+        y_values = np.asarray(arrays[y_index].to_numpy()).ravel()
+        if x_values.shape != y_values.shape or x_values.shape != segment_indexes.shape:
+            return []
+
+        series = []
+        boundaries = np.r_[0, np.flatnonzero(segment_indexes[1:] != segment_indexes[:-1]) + 1, len(segment_indexes)]
+        current = next((a for a in arrays if str(a.name).casefold() == "current"), None)
+        currents = np.asarray(current.to_numpy()) if current is not None else None
+        for start, end in zip(boundaries[:-1], boundaries[1:]):
+            finite = np.isfinite(x_values[start:end]) & np.isfinite(y_values[start:end])
+            if finite.any():
+                step_type = next(
+                    (str(value) for value in metadata.get("step_type", ())[start:end] if graph_widget._has_value(value)),
+                    "",
+                )
+                label = graph_widget._step_series_label(metadata, start, end, len(series) + 1)
+                if currents is not None and step_type.casefold() not in {"ocv", "open_circuit_voltage", "temperature"}:
+                    current_values = currents[start:end]
+                    valid = current_values[np.isfinite(current_values)]
+                    if len(valid) and np.any(valid != 0):
+                        signs = np.sign(np.nan_to_num(current_values))
+                        changes = np.r_[0, np.flatnonzero(signs[1:] != signs[:-1]) + 1, end-start]
+                        for left, right in zip(changes[:-1], changes[1:]):
+                            mask = finite[left:right]
+                            color_type = "discharge" if signs[left] < 0 else "charge" if signs[left] > 0 else step_type
+                            if mask.any():
+                                series.append((x_values[start+left:start+right][mask], y_values[start+left:start+right][mask], label, color_type))
+                        continue
+                series.append((x_values[start:end][finite], y_values[start:end][finite], label, step_type))
+        return series
+
+    @staticmethod
+    def _step_series_label(metadata, start, end, series_number):
+        execution_indexes = metadata.get("execution_index", ())[start:end]
+        step_types = metadata.get("step_type", ())[start:end]
+        execution_index = next(
+            (value for value in execution_indexes if graph_widget._has_value(value)),
+            series_number,
+        )
+        step_type = next(
+            (str(value) for value in step_types if graph_widget._has_value(value)),
+            "step",
+        )
+        try:
+            execution_label = f"{float(execution_index):g}"
+        except (TypeError, ValueError):
+            execution_label = str(execution_index)
+        return f"{execution_label} · {graph_widget._abbreviate_step_name(step_type)}"
+
+    @staticmethod
     def _split_eis_series(arrays, x_index, y_index):
         x_values = np.asarray(arrays[x_index].to_numpy()).ravel()
         y_values = np.asarray(arrays[y_index].to_numpy()).ravel()
-        if x_values.shape != y_values.shape:
+        return graph_widget._split_eis_values(arrays, x_values, y_values)
+
+    @staticmethod
+    def _split_eis_values(arrays, x_values, y_values):
+        if x_values.shape != y_values.shape or not len(x_values):
             return []
 
         finite = np.isfinite(x_values) & np.isfinite(y_values)
@@ -351,7 +621,7 @@ class graph_widget(QWidget):
             )
             details.append(f"Step {step_label}")
         if step_type:
-            details.append(step_type.replace("_", " "))
+            details.append(graph_widget._abbreviate_step_name(step_type))
         suffix = f" — {' · '.join(details)}" if details else ""
         return f"Spectrum {series_number}{suffix}"
 
@@ -365,7 +635,210 @@ class graph_widget(QWidget):
             return True
 
     def _dataset_view_for_selection(self, measurement, selection=None):
-        return self._dataset_view_from_views(measurement_dataset_views(measurement), selection)
+        return self._dataset_view_from_views(
+            self.available_dataset_views(),
+            selection,
+        )
+
+    def available_dataset_views(self):
+        if self.measurement is not None:
+            if self._measurement_view_cache is None:
+                self._measurement_view_cache = measurement_dataset_views(
+                    self.measurement, include_individual_measurements=True)
+            return self._measurement_view_cache + self.history_views
+        return list(self.live_dataset_views) + self.history_views
+
+    def select_dataset_view(self, dataset_id: str):
+        self.nyquist_mode = False
+        target_view = next(
+            (view for view in self.available_dataset_views() if view.id == dataset_id),
+            None,
+        )
+        target_arrays = dataset_arrays(target_view.dataset) if target_view is not None else []
+        x_index, y_index = default_axis_indexes(target_arrays)
+        selection = {
+            "dataset_id": dataset_id,
+            "x": x_index,
+            "left_y": y_index,
+            "right_y": None,
+        }
+        self.live_axis_selection = selection
+        self._plot_dataset_view(target_view, selection)
+
+    def set_step_time(self, enabled):
+        self.step_time_mode = enabled
+        selection = {"dataset_id": self.dataset_view_id, "x": self.x_index or 0,
+                     "left_y": self.y_index or 0, "right_y": self.right_y_index}
+        view = self._dataset_view_from_views(self.available_dataset_views(), selection)
+        if view is not None:
+            arrays = dataset_arrays(view.dataset)
+            if self.x_index is not None and self.x_index < len(arrays) and arrays[self.x_index].name in {"Time", "StepTime"}:
+                selection["x"] = next((i for i, a in enumerate(arrays) if a.name == ("StepTime" if enabled else "Time")), selection["x"])
+            self.live_axis_selection = selection
+            self._plot_dataset_view(view, selection)
+
+    def plot_nyquist(self) -> bool:
+        views = self.available_dataset_views()
+        if str(self.dataset_view_id).startswith("history_"):
+            views = [v for v in views if v.id == self.dataset_view_id]
+        else:
+            views = [v for v in views if not v.id.startswith("history_")]
+        unified_view = next((view for view in views if view.id == "eis"), None)
+        current_live_view = next((view for view in views if view.id == "eis_live"), None)
+        if unified_view is not None:
+            eis_views = [unified_view]
+            if current_live_view is not None:
+                eis_views.append(current_live_view)
+        else:
+            eis_views = [
+                view
+                for view in views
+                if view.is_eis and "subscan" not in view.id
+            ]
+
+        series = []
+        hover = []
+        primary_view = None
+        primary_indexes = None
+        for view in eis_views:
+            arrays = dataset_arrays(view.dataset)
+            components = self._impedance_components(arrays)
+            if components is None:
+                continue
+            real_values, imaginary_values, real_label, imaginary_label, real_index, imaginary_index = components
+            if primary_view is None:
+                primary_view = view
+                primary_indexes = (real_index, imaginary_index)
+                primary_labels = (real_label, imaginary_label)
+            view_series = self._split_eis_values(arrays, real_values, imaginary_values)
+            frequency_index = self._find_array_by_identifiers(arrays, {"frequency", "freq"})
+            frequencies = arrays[frequency_index].to_numpy() if frequency_index is not None else None
+            finite = np.isfinite(real_values) & np.isfinite(imaginary_values)
+            starts = np.flatnonzero(finite & np.concatenate(([True], ~finite[:-1]))) if len(finite) else []
+            ends = np.flatnonzero(finite & np.concatenate((~finite[1:], [True]))) + 1 if len(finite) else []
+            for start, end in zip(starts, ends):
+                hover.append((real_values[start:end], imaginary_values[start:end],
+                              frequencies[start:end] if frequencies is not None else None))
+            if not view_series:
+                finite = np.isfinite(real_values) & np.isfinite(imaginary_values)
+                if finite.any():
+                    view_series = [(real_values[finite], imaginary_values[finite], view.title)]
+            for x_values, imaginary_values, label in view_series:
+                if view.id == "eis_live":
+                    label = "Current · EIS"
+                series.append((x_values, np.asarray(imaginary_values), label))
+
+        if not series or primary_view is None or primary_indexes is None:
+            return False
+
+        self.nyquist_mode = True
+        self._nyquist_hover = hover
+        self.plot_item.vb.setAspectLocked(True, ratio=1)
+        self.dataset_view_id = primary_view.id
+        self.x_index, self.y_index = primary_indexes
+        self.right_y_index = None
+        self._plot_labeled_series(
+            series,
+            primary_labels[0],
+            f"-{primary_labels[1]}",
+        )
+        return True
+
+    def has_nyquist_data(self) -> bool:
+        for view in self.available_dataset_views():
+            if not view.is_eis:
+                continue
+            arrays = dataset_arrays(view.dataset)
+            if self._impedance_components(arrays) is not None:
+                return True
+        return False
+
+    @classmethod
+    def _impedance_components(cls, arrays):
+        real_index = cls._find_impedance_array(arrays, imaginary=False)
+        imaginary_index = cls._find_impedance_array(arrays, imaginary=True)
+        if real_index is not None and imaginary_index is not None:
+            real_array = arrays[real_index]
+            imaginary_array = arrays[imaginary_index]
+            return (
+                np.asarray(real_array.to_numpy()).ravel(),
+                np.asarray(imaginary_array.to_numpy()).ravel(),
+                f"{real_array.name}, {real_array.unit}",
+                f"{imaginary_array.name}, {imaginary_array.unit}",
+                real_index,
+                imaginary_index,
+            )
+
+        magnitude_index = cls._find_array_by_identifiers(
+            arrays,
+            {"z", "impedance", "absoluteimpedance", "impedancemodulus"},
+        )
+        phase_index = cls._find_array_by_identifiers(
+            arrays,
+            {"phase", "phaseangle"},
+        )
+        if magnitude_index is None or phase_index is None:
+            return None
+
+        magnitude_array = arrays[magnitude_index]
+        phase_array = arrays[phase_index]
+        magnitude = np.asarray(magnitude_array.to_numpy(), dtype=float).ravel()
+        phase = np.asarray(phase_array.to_numpy(), dtype=float).ravel()
+        if magnitude.shape != phase.shape:
+            return None
+        phase_unit = "".join(
+            character
+            for character in str(_get_unit(phase_array, "")).casefold()
+            if character.isalnum()
+        )
+        phase_radians = phase if phase_unit in {"rad", "radian", "radians"} else np.deg2rad(phase)
+        impedance_unit = _get_unit(magnitude_array, "")
+        return (
+            magnitude * np.cos(phase_radians),
+            # PalmSens Phase is -arg(Z), so this is the Nyquist ordinate -Im(Z).
+            magnitude * np.sin(phase_radians),
+            f"ZReal, {impedance_unit}",
+            f"ZImag, {impedance_unit}",
+            magnitude_index,
+            phase_index,
+        )
+
+    @staticmethod
+    def _find_impedance_array(arrays, *, imaginary: bool):
+        identifiers = (
+            {"zimag", "zim", "zimaginary", "imaginaryimpedance"}
+            if imaginary
+            else {"zreal", "zre", "realimpedance"}
+        )
+        for index, data_array in enumerate(arrays):
+            texts = (
+                _get_name(data_array, ""),
+                getattr(data_array, "type", ""),
+                getattr(data_array, "quantity", ""),
+            )
+            normalized = {
+                "".join(character for character in str(text).casefold() if character.isalnum())
+                for text in texts
+            }
+            if normalized.intersection(identifiers):
+                return index
+        return None
+
+    @staticmethod
+    def _find_array_by_identifiers(arrays, identifiers):
+        for index, data_array in enumerate(arrays):
+            texts = (
+                _get_name(data_array, ""),
+                getattr(data_array, "type", ""),
+                getattr(data_array, "quantity", ""),
+            )
+            normalized = {
+                "".join(character for character in str(text).casefold() if character.isalnum())
+                for text in texts
+            }
+            if normalized.intersection(identifiers):
+                return index
+        return None
 
     def _dataset_view_from_views(self, dataset_views, selection=None):
         if not dataset_views:
@@ -393,22 +866,29 @@ class graph_widget(QWidget):
         if dataset_view is None:
             return
 
+        first_live_data = self.live_current_view is None
         self.live_current_view = dataset_view
-        self._refresh_live_dataset_views()
-        self._plot_selected_live_view()
+        self.live_plot_dirty = True
+        if first_live_data:
+            self._update_live_plot()
 
     def _plot_selected_live_view(self):
+        if str(self.dataset_view_id).startswith("history_"):
+            return
+        if self.nyquist_mode and self.plot_nyquist():
+            return
         selection = self.live_axis_selection
         dataset_view = self._dataset_view_from_views(self.live_dataset_views, selection)
         if dataset_view is None:
             return
         if selection and selection.get("dataset_id") != dataset_view.id:
             selection = None
+            self.live_axis_selection = None
         self._plot_dataset_view(dataset_view, selection)
 
     def plot_live_selection(self, selection):
         self.live_axis_selection = selection
-        dataset_view = self._dataset_view_from_views(self.live_dataset_views, selection)
+        dataset_view = self._dataset_view_from_views(self.available_dataset_views(), selection)
         self._plot_dataset_view(dataset_view, selection)
 
     def _refresh_live_dataset_views(self):
@@ -416,12 +896,19 @@ class graph_widget(QWidget):
         if self.live_current_view is not None:
             views.append(self.live_current_view)
         self.live_dataset_views = views
+        self.dataset_views_changed.emit()
 
     def _accumulated_live_dataset_views(self):
         if self.live_run is None:
             return []
 
-        segments = list(self.live_run.segments)
+        if self._completed_view_cache is None:
+            self._completed_view_cache = measurement_dataset_views(
+                self.live_run, include_individual_measurements=True, include_individual_eis=False)
+        # Completed datasets are immutable; only convert the active segment on refresh.
+        views = [v for v in self._completed_view_cache if v.id not in {"measurement"}]
+        completed = next((v for v in self._completed_view_cache if v.id == "measurement"), None)
+        segments = []
         if (
             self.live_active_segment is not None
             and self.live_current_view is not None
@@ -437,10 +924,29 @@ class graph_widget(QWidget):
             f"{self.live_run.title} (live)",
             segments,
         )
-        views = measurement_dataset_views(
+        active_views = measurement_dataset_views(
             live_run,
+            include_individual_measurements=True,
             include_individual_eis=False,
         )
+        active = next((v for v in active_views if v.id == "measurement"), None)
+        if completed is not None and active is not None:
+            from src.measurement_data import UnifiedDataset, UnifiedDataArray
+            old = {a.name: a for a in dataset_arrays(completed.dataset)}
+            new = {a.name: a for a in dataset_arrays(active.dataset)}
+            n_old = len(next(iter(old.values())).to_numpy())
+            n_new = len(next(iter(new.values())).to_numpy())
+            combined = []
+            for name in dict.fromkeys((*old, *new)):
+                a = new.get(name, old.get(name))
+                fill = "" if name == "step_type" else np.nan
+                values = np.concatenate((old[name].to_numpy() if name in old else np.full(n_old, fill),
+                                         new[name].to_numpy() if name in new else np.full(n_new, fill)))
+                combined.append(UnifiedDataArray(a.name, a.unit, values, a.type, a.quantity))
+            views.insert(0, replace(completed, dataset=UnifiedDataset(live_run.title, tuple(combined))))
+        elif completed or active:
+            views.insert(0, completed or active)
+        views.extend(v for v in active_views if v.id != "measurement")
         titles = {
             "measurement": "Entire run (live)",
             "eis": "Entire run EIS (live)",
@@ -484,9 +990,18 @@ class graph_widget(QWidget):
         y_array = np.asarray(y_array).ravel()
         if x_array.shape != y_array.shape:
             return
+        if self.right_curve is not None or self.right_view is not None:
+            self._clear_right_axis()
+        self._axis_label("bottom", x_label)
+        self._axis_label("left", y_label)
+        if self.live_curve is not None and len(self.primary_curves) == 1:
+            self.live_curve.setData(x_array, y_array, connect="finite")
+            self._optimize_curve(self.live_curve, x_array)
+            if not self.auto_range_enabled:
+                self.plot_item.vb.enableAutoRange(enable=False)
+            return
+
         self._prepare_plot()
-        self.plot_widget.setLabel("bottom", f"{x_label}")
-        self.plot_widget.setLabel("left", f"{y_label}")
         pen = pg.mkPen(color="#2f6f9f", width=2)
         self.live_curve = self.plot_widget.plot(
             x_array,
@@ -495,15 +1010,56 @@ class graph_widget(QWidget):
             connect="finite",
         )
         self.primary_curves = [self.live_curve]
+        self._optimize_curve(self.live_curve, x_array)
         self._add_hover_marker()
 
-    def _plot_labeled_series(self, series, x_label, y_label):
-        self._prepare_plot()
-        self.plot_widget.setLabel("bottom", f"{x_label}")
-        self.plot_widget.setLabel("left", f"{y_label}")
+    @staticmethod
+    def _series_color_for(label, step_type=None, series_number=0):
+        label_text = str(label or "").casefold()
+        step_text = str(step_type or "").casefold().replace(" ", "_")
+        if "eis" in label_text or "spectrum" in label_text:
+            return graph_widget.EIS_SERIES_COLORS[series_number % len(graph_widget.EIS_SERIES_COLORS)]
+        for key, color in graph_widget.STEP_TYPE_COLORS.items():
+            normalized_key = key.casefold().replace(" ", "_")
+            if normalized_key == step_text or normalized_key in label_text:
+                return color
+        return "#2f6f9f"
 
-        for index, (x_values, y_values, label) in enumerate(series):
-            color = self.EIS_SERIES_COLORS[index % len(self.EIS_SERIES_COLORS)]
+    def set_legend_visible(self, visible: bool):
+        self.legend_visible = visible
+        if visible:
+            self.legend.show()
+        else:
+            self.legend.hide()
+
+    def _apply_legend_visibility(self):
+        self.legend.show() if self.legend_visible else self.legend.hide()
+
+    def _plot_labeled_series(self, series, x_label, y_label):
+        if self.right_curve is not None or self.right_view is not None:
+            self._clear_right_axis()
+        self._axis_label("bottom", x_label)
+        self._axis_label("left", y_label)
+
+        if len(series) == len(self.primary_curves) and self.primary_curves:
+            self.legend.clear()
+            for index, (curve, item) in enumerate(zip(self.primary_curves, series)):
+                x_values, y_values, _label, *_rest = item
+                curve.setPen(pg.mkPen(self._series_color_for(_label, _rest[0] if _rest else None, index), width=1))
+                self.legend.addItem(curve, _label)
+                curve.setData(x_values, y_values, connect="finite")
+                self._optimize_curve(curve, x_values)
+            if not self.auto_range_enabled:
+                self.plot_item.vb.enableAutoRange(enable=False)
+            self._apply_legend_visibility()
+            return
+
+        self._prepare_plot()
+
+        for index, item in enumerate(series):
+            x_values, y_values, label, *rest = item
+            step_type = rest[0] if rest else None
+            color = self._series_color_for(label, step_type=step_type, series_number=index)
             curve = self.plot_item.plot(
                 x_values,
                 y_values,
@@ -512,17 +1068,30 @@ class graph_widget(QWidget):
                 name=label,
             )
             self.primary_curves.append(curve)
+            self._optimize_curve(curve, x_values)
 
         self.live_curve = self.primary_curves[0] if self.primary_curves else None
-        self.legend.show()
+        self._apply_legend_visibility()
         self._add_hover_marker()
+
+    def _axis_label(self, axis, label, **kwargs):
+        name, separator, unit = label.rpartition(", ")
+        self.plot_item.setLabel(axis, name if separator else label, units=unit if separator else None, **kwargs)
+        self.plot_item.getAxis(axis).enableAutoSIPrefix(unit != "s")
+
+    def _optimize_curve(self, curve, x):
+        x = np.asarray(x)
+        monotonic = not self.nyquist_mode and np.isfinite(x).all() and np.all(np.diff(x) >= 0)
+        curve.setClipToView(bool(monotonic))
+        curve.setDownsampling(auto=bool(monotonic), method="peak")
+        curve.setPen(pg.mkPen(curve.opts["pen"].color(), width=1))
 
     def _prepare_plot(self):
         self._hide_hover_coordinates()
         self.plot_widget.clear()
         self._clear_right_axis()
         self.legend.clear()
-        self.legend.hide()
+        self._apply_legend_visibility()
         self.live_curve = None
         self.primary_curves = []
 
@@ -546,6 +1115,17 @@ class graph_widget(QWidget):
             return
 
         right_y_array = arrays[right_y_index]
+        if self.step_time_mode and x_array.name == "StepTime":
+            # Separate each step on both axes, including its first/last sample.
+            segments = next((a.to_numpy() for a in arrays if a.name == "segment_index"), None)
+            if segments is not None:
+                breaks = np.flatnonzero(segments[1:] != segments[:-1]) + 1
+                x = np.insert(x_array.to_numpy().astype(float), breaks, np.nan)
+                left = np.insert(left_y_array.to_numpy().astype(float), breaks, np.nan)
+                right = np.insert(right_y_array.to_numpy().astype(float), breaks, np.nan)
+                self._plot_dual_arrays(x, left, x, right, f"{x_array.name}, {x_array.unit}",
+                                      f"{left_y_array.name}, {left_y_array.unit}", f"{right_y_array.name}, {right_y_array.unit}")
+                return
         self._plot_dual_arrays(
             x_array.to_numpy(),
             left_y_array.to_numpy(),
@@ -569,9 +1149,14 @@ class graph_widget(QWidget):
 
         self._prepare_plot()
         self.plot_item.showAxis("right")
-        self.plot_item.setLabel("bottom", f"{x_label}")
-        self.plot_item.setLabel("left", f"{left_label}", color="#2f6f9f")
-        self.plot_item.setLabel("right", f"{right_label}", color="#7c3aed")
+        self._axis_label("bottom", x_label)
+        self._axis_label("left", left_label, color="#2f6f9f")
+        self._axis_label("right", right_label, color="#d833a1")
+        self.plot_item.getAxis("left").setTextPen("#2f6f9f")
+        self.plot_item.getAxis("right").setTextPen("#d833a1")
+
+        if self.align_axes:
+            self.right_view.setYLink(self.plot_item.vb)
 
         self.live_curve = self.plot_item.plot(
             left_x,
@@ -583,12 +1168,18 @@ class graph_widget(QWidget):
         self.right_curve = pg.PlotDataItem(
             right_x,
             right_y,
-            pen=pg.mkPen(color="#7c3aed", width=2),
+            pen=pg.mkPen(color="#d833a1", width=2),
             connect="finite",
         )
         self.right_view.addItem(self.right_curve)
+        self._optimize_curve(self.live_curve, left_x)
+        self._optimize_curve(self.right_curve, right_x)
         self._update_right_axis()
-        self.right_view.autoRange()
+        if self.auto_range_enabled:
+            self.right_view.autoRange()
+        else:
+            self.plot_item.vb.enableAutoRange(enable=False)
+            self.right_view.enableAutoRange(enable=False)
         self._add_hover_marker()
 
     def _setup_right_axis(self):
@@ -597,6 +1188,8 @@ class graph_widget(QWidget):
         self.plot_item.scene().addItem(self.right_view)
         self.plot_item.getAxis("right").linkToView(self.right_view)
         self.right_view.setXLink(self.plot_item.vb)
+        if self.align_axes:
+            self.right_view.setYLink(self.plot_item.vb)
         self.plot_item.getAxis("right").setPen("#7b8794")
         self.plot_item.getAxis("right").setTextPen("#56616f")
         self.plot_item.vb.sigResized.connect(self._update_right_axis)
@@ -604,6 +1197,7 @@ class graph_widget(QWidget):
 
     def _clear_right_axis(self):
         if self.right_view is not None:
+            self.right_view.setYLink(None)
             self.right_view.clear()
         self.right_curve = None
         self.plot_item.hideAxis("right")
@@ -725,6 +1319,7 @@ class axis_selection_dialog(QDialog):
 
 class graph_panel(QFrame):
     run_requested = Signal()
+    edit_requested = Signal()
     stop_requested = Signal()
     expand_requested = Signal(bool)
     selection_requested = Signal()
@@ -756,12 +1351,34 @@ class graph_panel(QFrame):
         self.toolbar.setMovable(False)
         self.toolbar.setIconSize(QSize(16, 16))
         self.toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        header_layout.addWidget(self.toolbar, 0, Qt.AlignmentFlag.AlignRight)
-
         layout.addLayout(header_layout)
+        self.status_label = QLabel(self)
+        self.status_label.setWordWrap(True)
+        self.status_label.hide()
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.toolbar)
+        self.toolbar.setMinimumWidth(0)
+        self.data_controls_widget = QWidget(self)
+        self.data_controls_widget.setObjectName("expandedDataControls")
+        data_controls_layout = QHBoxLayout(self.data_controls_widget)
+        data_controls_layout.setContentsMargins(0, 0, 0, 0)
+        data_controls_layout.setSpacing(8)
+        data_controls_layout.addWidget(QLabel("View", self.data_controls_widget))
+        self.step_view_combo = NoScrollComboBox(self.data_controls_widget)
+        self.step_view_combo.setMinimumWidth(220)
+        data_controls_layout.addWidget(self.step_view_combo, 1)
+        self.nyquist_button = QToolButton(self.data_controls_widget)
+        self.nyquist_button.setObjectName("nyquistButton")
+        self.nyquist_button.setText("Nyquist")
+        self.nyquist_button.setCheckable(True)
+        self.nyquist_button.setToolTip("Plot all EIS spectra as -ZImag versus ZReal")
+        data_controls_layout.addWidget(self.nyquist_button)
+        self.data_controls_widget.setVisible(False)
+        layout.addWidget(self.data_controls_widget)
         layout.addWidget(self.graph, 1)
 
         self.run_action = QAction("Run", self)
+        self.edit_action = QAction("Edit", self)
         self.stop_action = QAction("Stop", self)
         self.expand_action = QAction("Expand", self)
         self.expand_action.setCheckable(True)
@@ -771,17 +1388,37 @@ class graph_panel(QFrame):
         self.axes_action = QAction("Edit Axes", self)
         self.highlight_points_action = QAction("Highlight Points", self)
         self.highlight_points_action.setCheckable(True)
+        self.highlight_points_action.setChecked(True)
         self.highlight_points_action.setToolTip(
             "Snap hover values to the nearest visible point on the primary curve"
         )
 
+        self.align_axes_action = QAction("Align Axes", self)
+        self.align_axes_action.setCheckable(True)
+        self.align_axes_action.setToolTip(
+            "Keep the secondary Y axis locked to the primary Y axis when panning or zooming"
+        )
+        self.auto_range_action = QAction("Auto Range", self)
+        self.auto_range_action.setCheckable(True)
+        self.auto_range_action.setChecked(True)
+        self.auto_range_action.setToolTip("Automatically adjust the plot range when data changes")
+
         self.view_menu = QMenu(self)
+        self.step_time_action = self.view_menu.addAction("Step time (overlap steps)")
+        self.step_time_action.setCheckable(True)
+        self.step_time_action.toggled.connect(self.graph.set_step_time)
+        self.equal_axes_action = self.view_menu.addAction("Equal axes")
+        self.equal_axes_action.setCheckable(True)
+        self.equal_axes_action.toggled.connect(lambda enabled: self.graph.plot_item.vb.setAspectLocked(enabled, ratio=1))
         self.view_menu.addAction(self.zoom_area_action)
+        self.view_menu.addAction(self.align_axes_action)
+        self.view_menu.addAction(self.auto_range_action)
         self.view_menu.addAction(self.highlight_points_action)
         self.view_action = QAction("View", self)
         self.view_action.setMenu(self.view_menu)
 
         self.toolbar.addAction(self.run_action)
+        self.toolbar.addAction(self.edit_action)
         self.toolbar.addAction(self.stop_action)
         self.toolbar.addAction(self.expand_action)
         self.toolbar.addAction(self.axes_action)
@@ -789,6 +1426,15 @@ class graph_panel(QFrame):
         view_button = self.toolbar.widgetForAction(self.view_action)
         if isinstance(view_button, QToolButton):
             view_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.run_button = self.toolbar.widgetForAction(self.run_action)
+        self.edit_button = self.toolbar.widgetForAction(self.edit_action)
+        self.stop_button = self.toolbar.widgetForAction(self.stop_action)
+        if isinstance(self.run_button, QToolButton):
+            self.run_button.setObjectName("channelRunButton")
+        if isinstance(self.edit_button, QToolButton):
+            self.edit_button.setObjectName("channelEditButton")
+        if isinstance(self.stop_button, QToolButton):
+            self.stop_button.setObjectName("channelStopButton")
         self.toolbar.actionTriggered.connect(lambda _action: self.selection_requested.emit())
         self.view_menu.triggered.connect(lambda _action: self.selection_requested.emit())
         self.graph.plot_item.scene().sigMouseClicked.connect(
@@ -803,11 +1449,19 @@ class graph_panel(QFrame):
             overflow_button.setToolTip("More graph actions")
 
         self.run_action.triggered.connect(self.run_requested.emit)
+        self.edit_action.triggered.connect(self.edit_requested.emit)
         self.stop_action.triggered.connect(self.stop_requested.emit)
         self.expand_action.toggled.connect(self.expand_requested.emit)
         self.zoom_area_action.toggled.connect(self.graph.set_rectangle_zoom_enabled)
         self.axes_action.triggered.connect(self.edit_axes)
+        self.align_axes_action.toggled.connect(self.graph.set_align_axes)
+        self.auto_range_action.toggled.connect(self.graph.set_auto_range)
         self.highlight_points_action.toggled.connect(self.graph.set_snap_hover_to_data)
+        self.step_view_combo.currentIndexChanged.connect(self.change_step_view)
+        self.nyquist_button.toggled.connect(self.set_nyquist_view)
+        self.graph.dataset_views_changed.connect(self.refresh_data_controls)
+        self._is_running = False
+        self._is_configured = False
         self.set_running(False)
 
     def mousePressEvent(self, event):
@@ -821,27 +1475,116 @@ class graph_panel(QFrame):
         self.style().polish(self)
 
     def set_running(self, is_running: bool):
-        self.run_action.setEnabled(not is_running)
+        self._is_running = is_running
+        self.run_action.setEnabled(self._is_configured and not is_running)
+        self.edit_action.setEnabled(not is_running)
         self.stop_action.setEnabled(is_running)
+        self.run_action.setVisible(self._is_configured and not is_running)
+        self.edit_action.setVisible(not is_running)
+        self.stop_action.setVisible(is_running)
+
+    def set_configured(self, is_configured: bool):
+        self._is_configured = is_configured
+        self.run_action.setEnabled(is_configured and not self._is_running)
+        self.run_action.setVisible(is_configured and not self._is_running)
+        for button in (self.run_button, self.edit_button):
+            if not isinstance(button, QToolButton):
+                continue
+            button.setProperty("configured", is_configured)
+            button.style().unpolish(button)
+            button.style().polish(button)
 
     def set_status_text(self, status: str | None = None):
-        if status:
-            self.title_label.setText(f"{self.base_title} [{status}]")
-        else:
-            self.title_label.setText(self.base_title)
+        self.status_label.setText(status or "")
+        self.status_label.setVisible(bool(status))
 
     def set_expanded(self, is_expanded: bool):
         self.expand_action.blockSignals(True)
         self.expand_action.setChecked(is_expanded)
-        self.expand_action.setText("Restore" if is_expanded else "Expand")
+        self.expand_action.setText("Minimize" if is_expanded else "Expand")
         self.expand_action.blockSignals(False)
+        self.data_controls_widget.setVisible(is_expanded)
+        self.graph.set_live_plot_expanded(is_expanded)
+        self.graph.set_legend_visible(is_expanded)
+        if is_expanded:
+            self.refresh_data_controls()
+
+    def refresh_data_controls(self):
+        views = self.graph.available_dataset_views()
+        selectable_views = [
+            view
+            for view in views
+            if not view.is_eis
+            or (
+                view.id != "eis"
+                and "subscan" not in view.id
+            )
+        ]
+        previous_id = self.step_view_combo.currentData()
+
+        self.step_view_combo.blockSignals(True)
+        self.step_view_combo.clear()
+        for view in selectable_views:
+            if view.id == "measurement":
+                label = "All steps"
+            elif view.id == "live":
+                label = "Current · live"
+            elif view.id == "eis_live":
+                label = "Current · EIS"
+            elif view.id.startswith("eis_step_"):
+                parts = view.id.split("_")
+                execution_index = parts[2] if len(parts) > 2 else "?"
+                spectrum_number = parts[3] if len(parts) > 3 else "1"
+                suffix = f" {spectrum_number}" if spectrum_number != "1" else ""
+                label = f"{execution_index} · EIS{suffix}"
+            else:
+                label = view.title
+            self.step_view_combo.addItem(label, view.id)
+
+        preferred_id = previous_id
+        available_ids = {view.id for view in selectable_views}
+        if preferred_id not in available_ids and self.graph.dataset_view_id in available_ids:
+            preferred_id = self.graph.dataset_view_id
+        if preferred_id not in available_ids and "measurement" in available_ids:
+            preferred_id = "measurement"
+        preferred_index = self.step_view_combo.findData(preferred_id)
+        if preferred_index >= 0:
+            self.step_view_combo.setCurrentIndex(preferred_index)
+        self.step_view_combo.blockSignals(False)
+
+        has_nyquist = self.graph.has_nyquist_data()
+        self.nyquist_button.setEnabled(has_nyquist)
+        self.nyquist_button.blockSignals(True)
+        self.nyquist_button.setChecked(self.graph.nyquist_mode and has_nyquist)
+        self.nyquist_button.blockSignals(False)
+        self.step_view_combo.setEnabled(bool(selectable_views) and not self.nyquist_button.isChecked())
+
+    def change_step_view(self):
+        dataset_id = self.step_view_combo.currentData()
+        if dataset_id is None:
+            return
+        self.nyquist_button.blockSignals(True)
+        self.nyquist_button.setChecked(False)
+        self.nyquist_button.blockSignals(False)
+        self.graph.select_dataset_view(dataset_id)
+
+    def set_nyquist_view(self, enabled: bool):
+        self.equal_axes_action.setChecked(enabled)
+        if enabled:
+            if not self.graph.plot_nyquist():
+                self.nyquist_button.blockSignals(True)
+                self.nyquist_button.setChecked(False)
+                self.nyquist_button.blockSignals(False)
+        else:
+            self.graph.nyquist_mode = False
+            dataset_id = self.step_view_combo.currentData()
+            if dataset_id is not None:
+                self.graph.select_dataset_view(dataset_id)
+        self.refresh_data_controls()
 
     def edit_axes(self):
         measurement = self.graph.measurement
-        if measurement is None:
-            dataset_views = self.graph.live_dataset_views
-        else:
-            dataset_views = measurement_dataset_views(measurement)
+        dataset_views = self.graph.available_dataset_views()
 
         if not dataset_views:
             QMessageBox.information(
@@ -881,6 +1624,10 @@ class graph_panel(QFrame):
         )
         if dialog.exec():
             selection = dialog.selected_axes()
+            self.nyquist_button.blockSignals(True)
+            self.nyquist_button.setChecked(False)
+            self.nyquist_button.blockSignals(False)
+            self.graph.nyquist_mode = False
             if measurement is None:
                 self.graph.plot_live_selection(selection)
             else:

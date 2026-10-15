@@ -1,3 +1,5 @@
+STATUS_BAR_FONT_SIZE_PX = 12
+
 APP_STYLESHEET = """
 QMainWindow {
     background: #f4f6f8;
@@ -37,6 +39,46 @@ QToolBar#graphToolbar QToolButton:pressed,
 QToolBar#graphToolbar QToolButton:checked,
 QPushButton:pressed {
     background: #dce8f3;
+}
+
+QToolBar#graphToolbar QToolButton#channelRunButton[configured="true"] {
+    background: #e5f4e9;
+    border-color: #91c69d;
+    color: #245b31;
+}
+
+QToolBar#graphToolbar QToolButton#channelRunButton[configured="true"]:hover {
+    background: #d7eddd;
+    border-color: #70af7e;
+}
+
+QToolBar#graphToolbar QToolButton#channelEditButton[configured="true"] {
+    background: #e4f0fa;
+    border-color: #8eb9da;
+    color: #245779;
+}
+
+QToolBar#graphToolbar QToolButton#channelEditButton[configured="true"]:hover {
+    background: #d7e9f7;
+    border-color: #70a5cd;
+}
+
+QToolBar#graphToolbar QToolButton#channelStopButton:enabled {
+    background: #f9e5e5;
+    border-color: #d79a9a;
+    color: #7a2929;
+}
+
+QToolBar#graphToolbar QToolButton#channelStopButton:enabled:hover {
+    background: #f3d7d7;
+    border-color: #c77878;
+}
+
+QToolBar#graphToolbar QToolButton#channelRunButton[configured="true"]:disabled,
+QToolBar#graphToolbar QToolButton#channelEditButton[configured="true"]:disabled {
+    color: #8a96a3;
+    background: #f5f7f9;
+    border-color: #d8dee6;
 }
 
 QToolButton:disabled,
@@ -111,6 +153,32 @@ QToolBar#graphToolbar {
     spacing: 4px;
 }
 
+QWidget#expandedDataControls {
+    background: #f8fafc;
+    border: 1px solid #d8dee6;
+    border-radius: 7px;
+    padding: 5px 7px;
+}
+
+QToolButton#nyquistButton {
+    background: #ffffff;
+    border: 1px solid #c7d0da;
+    border-radius: 7px;
+    color: #243241;
+    padding: 6px 12px;
+}
+
+QToolButton#nyquistButton:hover {
+    background: #eef4fa;
+    border-color: #8ca3ba;
+}
+
+QToolButton#nyquistButton:checked {
+    background: #e8e2f7;
+    border-color: #9b87cf;
+    color: #4d3485;
+}
+
 QScrollArea#panelScrollArea {
     background: #f4f6f8;
     border: 0;
@@ -162,7 +230,13 @@ QListView::item:hover {
 }
 
 QStatusBar {
+    font-size: __STATUS_FONT_SIZE__px;
     background: #ffffff;
     border-top: 1px solid #d8dee6;
 }
+QStatusBar QLabel { font-size: __STATUS_FONT_SIZE__px; }
+QMenu { background: white; color: #1f2a36; border: 1px solid #c7d0da; padding: 5px; }
+QMenu::item { padding: 6px 20px; color: #1f2a36; }
+QMenu::item:selected { background: #edf3f8; }
 """
+APP_STYLESHEET = APP_STYLESHEET.replace("__STATUS_FONT_SIZE__", str(STATUS_BAR_FONT_SIZE_PX))

@@ -5,7 +5,7 @@ from PySide6.QtCore import QObject, Signal
 import pypalmsens as ps
 
 from src.channel_status import channel_status_snapshot
-from src.measurement_runner import measurement_runner
+from src.measurement_runner import TemperatureStepCoordinator, measurement_runner
 
 
 class palmsens_connection_service(QObject):
@@ -28,6 +28,8 @@ class palmsens_connection_service(QObject):
         self._runners = {}
         self._pending_aborts = set()
         self._runner_lock = threading.Lock()
+        self._temperature_coordinator = None
+        self._synchronize_temperature_steps = False
 
     @property
     def is_running(self):
@@ -44,6 +46,8 @@ class palmsens_connection_service(QObject):
         with self._runner_lock:
             self._runners.clear()
             self._pending_aborts.clear()
+        self._temperature_coordinator = None
+        self._synchronize_temperature_steps = False
 
         self._thread = threading.Thread(
             target=self._run,
@@ -72,10 +76,32 @@ class palmsens_connection_service(QObject):
             self.measurement_failed.emit(run_id, "PalmSens connection is not ready.")
             return
 
+        if temperature_settings is not None and temperature_settings.sync_channels:
+            self._synchronize_temperature_steps = True
+
         asyncio.run_coroutine_threadsafe(
             self._run_measurement(run_id, instrument, method, temperature_settings),
             loop,
         )
+
+    def start_measurement_batch(self, requests):
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            for run_id, *_ in requests:
+                self.measurement_failed.emit(run_id, "PalmSens connection is not ready.")
+            return
+
+        async def start_batch():
+            participants = {id(instrument) for _, instrument, _, settings in requests
+                            if settings is not None and settings.sync_channels}
+            coordinator = TemperatureStepCoordinator(participants)
+            await asyncio.gather(*(self._run_measurement(
+                run_id, instrument, method, settings,
+                temperature_coordinator=coordinator,
+                synchronize_temperature_steps=id(instrument) in participants,
+            ) for run_id, instrument, method, settings in requests))
+
+        asyncio.run_coroutine_threadsafe(start_batch(), loop)
 
     def abort_measurement(self, run_id):
         with self._runner_lock:
@@ -101,12 +127,16 @@ class palmsens_connection_service(QObject):
         self._loop = asyncio.get_running_loop()
         try:
             await self._connect_channels()
+            self._temperature_coordinator = TemperatureStepCoordinator(
+                set(self._managers)
+            )
             if not self._stop_requested.is_set():
                 self.connected.emit()
             while not self._stop_requested.is_set():
                 await asyncio.sleep(0.1)
         finally:
             await self._disconnect_channels()
+            self._temperature_coordinator = None
             self._loop = None
 
     async def _connect_channels(self):
@@ -173,9 +203,13 @@ class palmsens_connection_service(QObject):
         instrument,
         method,
         temperature_settings,
+        temperature_coordinator=None,
+        synchronize_temperature_steps=None,
     ):
         manager = self._managers.get(id(instrument))
         if manager is None:
+            if temperature_coordinator is not None:
+                temperature_coordinator.withdraw(id(instrument))
             self.measurement_failed.emit(run_id, "This channel is not connected.")
             return
 
@@ -183,6 +217,9 @@ class palmsens_connection_service(QObject):
             instrument,
             method,
             temperature_settings=temperature_settings,
+            temperature_coordinator=temperature_coordinator or self._temperature_coordinator,
+            synchronize_temperature_steps=(self._synchronize_temperature_steps
+                if synchronize_temperature_steps is None else synchronize_temperature_steps),
         )
         runner.progress.connect(
             lambda data, run_id=run_id: self.measurement_progress.emit(run_id, data)
@@ -206,6 +243,10 @@ class palmsens_connection_service(QObject):
         else:
             self.measurement_finished.emit(run_id, measurement)
         finally:
+            if runner.temperature_coordinator is not None:
+                runner.temperature_coordinator.withdraw(id(instrument))
             with self._runner_lock:
                 self._runners.pop(run_id, None)
                 self._pending_aborts.discard(run_id)
+                if not self._runners:
+                    self._synchronize_temperature_steps = False

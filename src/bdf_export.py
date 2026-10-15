@@ -179,20 +179,47 @@ def _term(
 def _normalize_text(value) -> str:
     if value is None:
         return ""
-    return re.sub(r"[^a-z0-9]+", "", str(value).casefold())
+    # Primes distinguish Z, Z' and Z''; stripping them aliases all three.
+    text = str(value).casefold().replace("`", "'").replace("′", "'").replace("″", "''")
+    return re.sub(r"[^a-z0-9']+", "", text)
 
 
 _BDF_TERMS = (
-    _term("ac_internal_resistance_ohm", "AC Internal Resistance / ohm", ("ac_resistance_ohm", "acr"), _RESISTANCE_FACTORS),
-    _term("absolute_impedance_ohm", "Absolute Impedance / ohm", ("impedance_modulus", "z_abs", "abs_z"), _RESISTANCE_FACTORS),
-    _term("ambient_pressure_pa", "Ambient Pressure / Pa", ("ambient_pressure_pascal", "ambient_pressure", "ambient_air_pressure"), _PRESSURE_FACTORS),
+    _term("step_time_second", "Step Time / s", ("step_time_s", "step_time", "steptime", "step_elapsed_time"), _TIME_FACTORS),
+    _term("test_time_second", "Test Time / s", ("test_time_s", "test_time", "testtime", "elapsed_time", "elapsedtime", "time"), _TIME_FACTORS, required=True),
+    _term("current_ampere", "Current / A", ("current_a", "current", "i"), _CURRENT_FACTORS, required=True),
+    _term("voltage_volt", "Voltage / V", ("voltage_v", "voltage", "potential", "e", "v"), _VOLTAGE_FACTORS, required=True),
+    _term("voltage_wevsce_volt", "Voltage Full Cell / V", ("full_cell_voltage", "full_cell", "potentialwevsce"), _VOLTAGE_FACTORS),
     _term("ambient_temperature_celsius", "Ambient Temperature / degC", ("ambient_temperature_degc", "chamber_temperature", "environment_temperature"), _TEMPERATURE_FACTORS),
-    _term("applied_pressure_pa", "Applied Pressure / Pa", ("applied_pressure_pascal", "applied_pressure"), _PRESSURE_FACTORS),
+    _term("temperature_t1_celsius", "Temperature T1 / degC", ("surface_temperature_t1_celsius", "temperature_t1_degc", "temperature_t1", "temperature", "temp", "t1"), _TEMPERATURE_FACTORS),
+    _term("frequency_hertz", "Frequency / Hz", ("frequency", "freq", "f"), _FREQUENCY_FACTORS),
+    _term("imaginary_impedance_ohm", "Imaginary Impedance / ohm", ("z_imag", "zimag", "z_im", "zim", "z''", "z``"), _RESISTANCE_FACTORS),
+    _term("real_impedance_ohm", "Real Impedance / ohm", ("z_real", "zreal", "z_re", "zre", "z'", "z`"), _RESISTANCE_FACTORS),
+    _term("absolute_impedance_ohm", "Absolute Impedance / ohm", ("impedance", "impedance_modulus", "z", "z_abs", "abs_z"), _RESISTANCE_FACTORS),
+    _term("phase_degree", "Phase / deg", ("phase", "phase_angle", "phase_deg"), _ANGLE_FACTORS),
     _term("charging_capacity_ah", "Charging Capacity / Ah", ("charging_capacity_ampere_hour", "charge_capacity_ah"), _CAPACITY_FACTORS),
     _term("charging_energy_wh", "Charging Energy / Wh", ("charging_energy_watt_hour", "charge_energy_wh"), _ENERGY_FACTORS),
     _term("cumulative_capacity_ah", "Cumulative Capacity / Ah", ("cumulative_capacity_ampere_hour", "total_capacity_ah", "throughput_capacity_ah"), _CAPACITY_FACTORS),
     _term("cumulative_energy_wh", "Cumulative Energy / Wh", ("cumulative_energy_watt_hour", "total_energy_wh", "throughput_energy_wh"), _ENERGY_FACTORS),
-    _term("current_ampere", "Current / A", ("current_a", "current", "i"), _CURRENT_FACTORS, required=True),
+    _term("discharging_capacity_ah", "Discharging Capacity / Ah", ("discharging_capacity_ampere_hour", "discharge_capacity_ah"), _CAPACITY_FACTORS),
+    _term("discharging_energy_wh", "Discharging Energy / Wh", ("discharging_energy_watt_hour", "discharge_energy_wh"), _ENERGY_FACTORS),
+    _term("net_capacity_ah", "Net Capacity / Ah", ("net_capacity_ampere_hour", "q_q0"), _CAPACITY_FACTORS),
+    _term("net_energy_wh", "Net Energy / Wh", ("net_energy_watt_hour",), _ENERGY_FACTORS),
+    _term("step_id", "Step ID", ("step_index_in_program", "program_step", "ns"), _COUNT_FACTORS),
+    _term("step_type", "Step Type", ("mode", "operation_mode"), None, "string"),
+    _term("step_charging_capacity_ah", "Step Charging Capacity / Ah", ("step_charge_capacity_ah", "step_charging_capacity_ampere_hour", "q_charge"), _CAPACITY_FACTORS),
+    _term("step_charging_energy_wh", "Step Charging Energy / Wh", ("step_charge_energy_wh", "step_charging_energy_watt_hour"), _ENERGY_FACTORS),
+    _term("step_cumulative_capacity_ah", "Step Cumulative Capacity / Ah", ("step_capacity_ah", "step_cumulative_capacity_ampere_hour"), _CAPACITY_FACTORS),
+    _term("step_cumulative_energy_wh", "Step Cumulative Energy / Wh", ("step_energy_wh", "step_cumulative_energy_watt_hour"), _ENERGY_FACTORS),
+    _term("step_discharging_capacity_ah", "Step Discharging Capacity / Ah", ("step_discharge_capacity_ah", "step_discharging_capacity_ampere_hour", "q_discharge"), _CAPACITY_FACTORS),
+    _term("step_discharging_energy_wh", "Step Discharging Energy / Wh", ("step_discharge_energy_wh", "step_discharging_energy_watt_hour"), _ENERGY_FACTORS),
+    _term("step_net_capacity_ah", "Step Net Capacity / Ah", ("step_net_capacity_ampere_hour",), _CAPACITY_FACTORS),
+    _term("step_net_energy_wh", "Step Net Energy / Wh", ("step_net_energy_watt_hour",), _ENERGY_FACTORS),
+    _term("power_watt", "Power / W", ("power_w", "power", "p"), _POWER_FACTORS),
+    _term("internal_resistance_ohm", "Internal Resistance / ohm", ("internal_resistance", "resistance", "r_int"), _RESISTANCE_FACTORS),
+    _term("ac_internal_resistance_ohm", "AC Internal Resistance / ohm", ("ac_resistance_ohm", "acr"), _RESISTANCE_FACTORS),
+    _term("ambient_pressure_pa", "Ambient Pressure / Pa", ("ambient_pressure_pascal", "ambient_pressure", "ambient_air_pressure"), _PRESSURE_FACTORS),
+    _term("applied_pressure_pa", "Applied Pressure / Pa", ("applied_pressure_pascal", "applied_pressure"), _PRESSURE_FACTORS),
     _term("cycle_charging_capacity_ah", "Cycle Charging Capacity / Ah", ("cycle_charge_capacity_ah", "cycle_charging_capacity_ampere_hour"), _CAPACITY_FACTORS),
     _term("cycle_charging_energy_wh", "Cycle Charging Energy / Wh", ("cycle_charge_energy_wh", "cycle_charging_energy_watt_hour"), _ENERGY_FACTORS),
     _term("cycle_count", "Cycle Count / 1", ("cycle_count_1", "cycle_dimensionless", "cycle_number", "cycle"), _COUNT_FACTORS),
@@ -203,44 +230,22 @@ _BDF_TERMS = (
     _term("cycle_net_capacity_ah", "Cycle Net Capacity / Ah", ("cycle_net_capacity_ampere_hour",), _CAPACITY_FACTORS),
     _term("cycle_net_energy_wh", "Cycle Net Energy / Wh", ("cycle_net_energy_watt_hour",), _ENERGY_FACTORS),
     _term("dc_internal_resistance_ohm", "DC Internal Resistance / ohm", ("dc_resistance_ohm", "dcir", "dcir_ohm"), _RESISTANCE_FACTORS),
-    _term("discharging_capacity_ah", "Discharging Capacity / Ah", ("discharging_capacity_ampere_hour", "discharge_capacity_ah"), _CAPACITY_FACTORS),
-    _term("discharging_energy_wh", "Discharging Energy / Wh", ("discharging_energy_watt_hour", "discharge_energy_wh"), _ENERGY_FACTORS),
-    _term("frequency_hertz", "Frequency / Hz", ("frequency", "freq", "f"), _FREQUENCY_FACTORS),
-    _term("imaginary_impedance_ohm", "Imaginary Impedance / ohm", ("z_imag", "zimag", "z_im", "zim", "z''", "z``"), _RESISTANCE_FACTORS),
-    _term("internal_resistance_ohm", "Internal Resistance / ohm", ("internal_resistance", "resistance", "r_int"), _RESISTANCE_FACTORS),
-    _term("net_capacity_ah", "Net Capacity / Ah", ("net_capacity_ampere_hour", "q_q0"), _CAPACITY_FACTORS),
-    _term("net_energy_wh", "Net Energy / Wh", ("net_energy_watt_hour",), _ENERGY_FACTORS),
-    _term("phase_degree", "Phase / deg", ("phase", "phase_angle", "phase_deg"), _ANGLE_FACTORS),
-    _term("power_watt", "Power / W", ("power_w", "power", "p"), _POWER_FACTORS),
-    _term("real_impedance_ohm", "Real Impedance / ohm", ("z_real", "zreal", "z_re", "zre", "z'", "z`"), _RESISTANCE_FACTORS),
     _term("record_index", "Record Index / 1", ("record", "record_number", "data_point", "data_point_index"), _COUNT_FACTORS),
-    _term("step_charging_capacity_ah", "Step Charging Capacity / Ah", ("step_charge_capacity_ah", "step_charging_capacity_ampere_hour", "q_charge"), _CAPACITY_FACTORS),
-    _term("step_charging_energy_wh", "Step Charging Energy / Wh", ("step_charge_energy_wh", "step_charging_energy_watt_hour"), _ENERGY_FACTORS),
     _term("step_count", "Step Count / 1", ("step_count_1", "step_dimensionless", "step_number"), _COUNT_FACTORS),
-    _term("step_cumulative_capacity_ah", "Step Cumulative Capacity / Ah", ("step_capacity_ah", "step_cumulative_capacity_ampere_hour"), _CAPACITY_FACTORS),
-    _term("step_cumulative_energy_wh", "Step Cumulative Energy / Wh", ("step_energy_wh", "step_cumulative_energy_watt_hour"), _ENERGY_FACTORS),
-    _term("step_discharging_capacity_ah", "Step Discharging Capacity / Ah", ("step_discharge_capacity_ah", "step_discharging_capacity_ampere_hour", "q_discharge"), _CAPACITY_FACTORS),
-    _term("step_discharging_energy_wh", "Step Discharging Energy / Wh", ("step_discharge_energy_wh", "step_discharging_energy_watt_hour"), _ENERGY_FACTORS),
-    _term("step_id", "Step ID", ("step_index_in_program", "program_step", "ns"), _COUNT_FACTORS),
     _term("step_index", "Step Index / 1", ("step_index_1", "within_step_index"), _COUNT_FACTORS),
-    _term("step_net_capacity_ah", "Step Net Capacity / Ah", ("step_net_capacity_ampere_hour",), _CAPACITY_FACTORS),
-    _term("step_net_energy_wh", "Step Net Energy / Wh", ("step_net_energy_watt_hour",), _ENERGY_FACTORS),
-    _term("step_time_second", "Step Time / s", ("step_time_s", "step_time", "steptime", "step_elapsed_time"), _TIME_FACTORS),
-    _term("step_type", "Step Type", ("mode", "operation_mode"), None, "string"),
     _term("surface_pressure_pa", "Surface Pressure / Pa", ("surface_pressure_pascal", "surface_pressure", "skin_pressure"), _PRESSURE_FACTORS),
     _term("surface_temperature_celsius", "Surface Temperature / degC", ("surface_temperature_degc", "surface_temperature", "skin_temperature"), _TEMPERATURE_FACTORS),
-    _term("temperature_t1_celsius", "Temperature T1 / degC", ("surface_temperature_t1_celsius", "temperature_t1_degc", "temperature_t1", "temperature", "temp", "t1"), _TEMPERATURE_FACTORS),
     _term("temperature_t2_celsius", "Temperature T2 / degC", ("surface_temperature_t2_celsius", "temperature_t2_degc", "temperature_t2", "t2"), _TEMPERATURE_FACTORS),
     _term("temperature_t3_celsius", "Temperature T3 / degC", ("surface_temperature_t3_celsius", "temperature_t3_degc", "temperature_t3", "t3"), _TEMPERATURE_FACTORS),
     _term("temperature_t4_celsius", "Temperature T4 / degC", ("surface_temperature_t4_celsius", "temperature_t4_degc", "temperature_t4", "t4"), _TEMPERATURE_FACTORS),
     _term("temperature_t5_celsius", "Temperature T5 / degC", ("surface_temperature_t5_celsius", "temperature_t5_degc", "temperature_t5", "t5"), _TEMPERATURE_FACTORS),
-    _term("test_time_second", "Test Time / s", ("test_time_s", "test_time", "testtime", "elapsed_time", "elapsedtime", "time"), _TIME_FACTORS, required=True),
     _term("unix_time_second", "Unix Time / s", ("unix_time_s", "unix_time", "timestamp", "epoch_time"), _TIME_FACTORS),
-    _term("voltage_volt", "Voltage / V", ("voltage_v", "voltage", "potential", "e", "v"), _VOLTAGE_FACTORS, required=True),
 )
 
 _BDF_TERMS_BY_KEY = {term.key: term for term in _BDF_TERMS}
 _REQUIRED_BDF_KEYS = tuple(term.key for term in _BDF_TERMS if term.required)
+_CUSTOM_BDF_KEYS = {"voltage_wevsce_volt"}
+_WEVSCE_IDENTIFIERS = {"potentialwevsce", "voltagewevsce", "wevsce"}
 _STEP_DERIVED_KEYS = {
     "step_charging_capacity_ah",
     "step_discharging_capacity_ah",
@@ -260,6 +265,19 @@ _CYCLE_DERIVED_KEYS = {
     "cycle_discharging_energy_wh",
     "cycle_cumulative_energy_wh",
     "cycle_net_energy_wh",
+}
+_EIS_EXCLUDED_BDF_KEYS = {
+    "power_watt",
+    "charging_capacity_ah",
+    "charging_energy_wh",
+    "cumulative_capacity_ah",
+    "cumulative_energy_wh",
+    "discharging_capacity_ah",
+    "discharging_energy_wh",
+    "net_capacity_ah",
+    "net_energy_wh",
+    * _STEP_DERIVED_KEYS,
+    * _CYCLE_DERIVED_KEYS,
 }
 _BDF_ALIAS_TO_KEY: dict[str, str] = {}
 for _term_definition in _BDF_TERMS:
@@ -287,6 +305,14 @@ def export_measurement_to_bdf_files(
 
     for dataset_view in dataset_views:
         groups = _measurement_groups(dataset_view.dataset)
+        method = getattr(dataset_view.source, "method", None)
+        if callable(getattr(method, "to_settings", None)):
+            method = method.to_settings()
+        for group in groups:
+            group["open_circuit"] = (
+                type(method).__name__ == "OpenCircuitPotentiometry"
+                or getattr(method, "id", None) == "ocp"
+            )
         for group in groups:
             try:
                 series = _extract_bdf_series(group, optional_quantity_keys)
@@ -298,7 +324,9 @@ def export_measurement_to_bdf_files(
 
             dataframe = _build_dataframe(series)
             dataframes.append(dataframe)
-            res = bdf.validate(dataframe, raise_on_error=True)
+            known_bdf_labels = {term.label for term in _BDF_TERMS if term.key not in _CUSTOM_BDF_KEYS}
+            validation_df = dataframe[[col for col in dataframe.columns if col in known_bdf_labels]]
+            res = bdf.validate(validation_df, raise_on_error=True)
             if not res["ok"]:
                 raise BdfExportError("Invalid battery data format dataframe")
     if not dataframes:
@@ -365,6 +393,11 @@ def _data_array_key(data_array, index: int) -> str:
 def _extract_bdf_series(group, optional_quantity_keys: set[str] | None = None) -> dict[str, list]:
     series = {}
     raw_dependency_keys = _raw_dependency_keys(optional_quantity_keys)
+    is_eis = _is_eis_group(group)
+    if is_eis and optional_quantity_keys is not None:
+        optional_quantity_keys = set(optional_quantity_keys) - _EIS_EXCLUDED_BDF_KEYS
+    elif is_eis:
+        optional_quantity_keys = set(_BDF_TERMS_BY_KEY) - _EIS_EXCLUDED_BDF_KEYS
 
     for entry in group["arrays"]:
         data_array = entry["array"]
@@ -374,8 +407,8 @@ def _extract_bdf_series(group, optional_quantity_keys: set[str] | None = None) -
         quantity = getattr(data_array, "quantity", "")
         unit = getattr(data_array, "unit", "")
         values = data_array.to_numpy()
-
         column_key = _detect_bdf_column(base_key, array_name, array_type, quantity, unit)
+
         if column_key is None or column_key in series:
             continue
         if optional_quantity_keys is not None:
@@ -384,7 +417,11 @@ def _extract_bdf_series(group, optional_quantity_keys: set[str] | None = None) -
 
         text_values = (base_key, array_name, array_type, quantity)
         series[column_key] = _convert_values(column_key, unit, values, text_values)
+        # PalmSens supplies -Im(Z) and -phase; BDF uses signed Im(Z) and phase.
+        if column_key in {"imaginary_impedance_ohm", "phase_degree"}:
+            series[column_key] = [-value for value in series[column_key]]
 
+    _add_open_circuit_current(series, group)
     missing_columns = [column_key for column_key in _REQUIRED_BDF_KEYS if column_key not in series]
     if missing_columns:
         _add_open_circuit_current(series, group)
@@ -395,6 +432,10 @@ def _extract_bdf_series(group, optional_quantity_keys: set[str] | None = None) -
             "Missing required BDF quantities. The measurement must include time, voltage, and current arrays."
         )
 
+    if "step_time_second" not in series and "test_time_second" in series:
+        times = series["test_time_second"]
+        if times:
+            series["step_time_second"] = [value - times[0] for value in times]
     _ensure_matching_lengths(series)
     _derive_bdf_series(series, optional_quantity_keys)
     series = _filter_bdf_series(series, optional_quantity_keys)
@@ -405,6 +446,13 @@ def _extract_bdf_series(group, optional_quantity_keys: set[str] | None = None) -
 
 def _add_open_circuit_current(series: dict[str, list], group):
     if "current_ampere" in series:
+        for entry in group["arrays"]:
+            array = entry["array"]
+            if _normalize_text(getattr(array, "name", "")) == "steptype":
+                for index, step_type in enumerate(array.to_numpy()):
+                    if index < len(series["current_ampere"]) and _is_open_circuit_step_type(step_type):
+                        if not math.isfinite(series["current_ampere"][index]):
+                            series["current_ampere"][index] = 0.0
         return
     if "test_time_second" not in series or "voltage_volt" not in series:
         return
@@ -415,6 +463,8 @@ def _add_open_circuit_current(series: dict[str, list], group):
 
 
 def _is_open_circuit_group(group) -> bool:
+    if group.get("open_circuit"):
+        return True
     for entry in group["arrays"]:
         data_array = entry["array"]
         base_key = entry["base_key"]
@@ -426,10 +476,29 @@ def _is_open_circuit_group(group) -> bool:
             continue
 
         values = data_array.to_numpy()
-        if any(_is_open_circuit_step_type(value) for value in values):
+        if len(values) and all(_is_open_circuit_step_type(value) for value in values):
             return True
 
     return False
+
+
+def _is_eis_group(group) -> bool:
+    detected_keys = {
+        _detect_bdf_column(
+            entry["base_key"],
+            getattr(entry["array"], "name", entry["base_key"]),
+            getattr(entry["array"], "type", ""),
+            getattr(entry["array"], "quantity", ""),
+            getattr(entry["array"], "unit", ""),
+        )
+        for entry in group["arrays"]
+    }
+    return "frequency_hertz" in detected_keys and (
+        "real_impedance_ohm" in detected_keys
+        or "imaginary_impedance_ohm" in detected_keys
+        or "absolute_impedance_ohm" in detected_keys
+        or "phase_degree" in detected_keys
+    )
 
 
 def _is_open_circuit_step_type(value) -> bool:
@@ -443,10 +512,14 @@ def _raw_dependency_keys(optional_quantity_keys: set[str] | None) -> set[str]:
         return set(_BDF_TERMS_BY_KEY)
 
     keys = set(_REQUIRED_BDF_KEYS)
+    keys.add("step_time_second")
     keys.update(optional_quantity_keys)
 
     if optional_quantity_keys.intersection({"absolute_impedance_ohm", "phase_degree"}):
         keys.update({"real_impedance_ohm", "imaginary_impedance_ohm"})
+
+    if optional_quantity_keys.intersection({"real_impedance_ohm", "imaginary_impedance_ohm"}):
+        keys.update({"absolute_impedance_ohm", "phase_degree"})
 
     if optional_quantity_keys.intersection(_STEP_DERIVED_KEYS):
         keys.update({"step_count", "step_id", "step_time_second"})
@@ -462,6 +535,7 @@ def _filter_bdf_series(series: dict[str, list], optional_quantity_keys: set[str]
         return series
 
     allowed_keys = set(_REQUIRED_BDF_KEYS)
+    allowed_keys.add("step_time_second")
     allowed_keys.update(optional_quantity_keys)
     return {column_key: values for column_key, values in series.items() if column_key in allowed_keys}
 
@@ -485,6 +559,17 @@ def _derive_bdf_series(series: dict[str, list], optional_quantity_keys: set[str]
             series["absolute_impedance_ohm"] = [math.hypot(re, im) for re, im in zip(real, imag)]
         if _quantity_requested("phase_degree", series, optional_quantity_keys):
             series["phase_degree"] = [math.degrees(math.atan2(im, re)) for re, im in zip(real, imag)]
+
+    if (
+        not _has_keys(series, "real_impedance_ohm", "imaginary_impedance_ohm")
+        and _has_keys(series, "absolute_impedance_ohm", "phase_degree")
+    ):
+        z_abs = series["absolute_impedance_ohm"]
+        phase = series["phase_degree"]
+        if _quantity_requested("real_impedance_ohm", series, optional_quantity_keys):
+            series["real_impedance_ohm"] = [z * math.cos(math.radians(p)) for z, p in zip(z_abs, phase)]
+        if _quantity_requested("imaginary_impedance_ohm", series, optional_quantity_keys):
+            series["imaginary_impedance_ohm"] = [z * math.sin(math.radians(p)) for z, p in zip(z_abs, phase)]
 
     _derive_capacity_series(
         series,
@@ -708,6 +793,16 @@ def _detect_bdf_column(base_key: str, array_name: str, array_type: str, quantity
         _normalize_text(quantity),
     )
     unit_key = _normalize_unit(unit)
+    raw_unit = str(unit).strip()
+
+    # This is another voltage array, so identify it before generic aliases such
+    # as "potential" or the voltage-unit fallback can claim it.
+    if any(identifier in text for text in texts for identifier in _WEVSCE_IDENTIFIERS):
+        return "voltage_wevsce_volt"
+    if "cellpotential" in texts:
+        return "voltage_wevsce_volt"
+    if "cepotential" in texts:
+        return None
 
     for text in texts:
         column_key = _BDF_ALIAS_TO_KEY.get(text)
@@ -719,7 +814,7 @@ def _detect_bdf_column(base_key: str, array_name: str, array_type: str, quantity
         if any(len(alias) >= 3 and alias in text for text in texts for alias in aliases):
             return term.key
 
-    if unit_key in _TIME_FACTORS:
+    if unit_key in _TIME_FACTORS and raw_unit != "S":
         return "test_time_second"
     if unit_key in _VOLTAGE_FACTORS:
         return "voltage_volt"
